@@ -6,6 +6,28 @@ First move, always:
 c2c doctor
 ```
 
+For automation, use the versioned recovery result:
+
+```bash
+c2c doctor -w /path/to/workspace --json
+c2c doctor -w /path/to/workspace --diagnose-only --json
+```
+
+`--diagnose-only` (and its existing alias, `--no-fix`) never changes Bridge,
+Tunnel, OAuth, session, lease, or endpoint state. JSON always contains
+`version`, `outcome`, stable `reason`, `repairs`, `safeRetry`, and exactly one
+structured `nextAction`. The legacy `report`, `chatgptRepair`, and
+`namedRepair` fields remain available for existing callers.
+
+| Outcome | Exit status | Meaning |
+| --- | ---: | --- |
+| `healthy`, `repaired` | 0 | Recovery is complete. |
+| `busy`, `user_action_required` | 2 | Nonfatal stop; follow the single `nextAction`. |
+| `blocked`, `unknown` | 1 | Recovery failed or cannot be decided safely. |
+
+Doctor output redacts bearer/refresh tokens, pairing-code patterns, browser
+credentials, and user home-directory paths.
+
 It checks Node, workspace, bridge, MCP, OAuth and tunnel — and repairs what it
 can (restarts the bridge, restarts the tunnel) without asking.
 
