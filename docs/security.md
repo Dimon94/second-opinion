@@ -38,16 +38,21 @@
 Scopes: `workspace.read`, `workspace.search`, `git.read`, `execution.read`,
 `offline_access`. Tools enforce scopes individually (`INSUFFICIENT_SCOPE`).
 Access tokens: 1 hour. Refresh tokens: 30 days, rotated. Tokens remain bound to
-their issuing Bridge auth store and `client_id`; local admin activation changes
-only the canonical data root and does not rewrite authorization state.
+the exact endpoint, issuer, resource/audience, client registration, scope set,
+and machine-global Bridge identity. Any mismatch fails closed with a specific
+reason. Local admin activation changes only the canonical data root: the global
+grant follows the workspace currently selected by local Codex and remote OAuth
+or MCP requests cannot choose that workspace or broaden its read-only scopes.
 
 ## Storage
 
 State lives under the OS-convention app dir
 (`~/Library/Application Support/codex-with-chatgpt` on macOS), directories 0700,
 files 0600. Named-hostname preference and tunnel metadata live there too
-(`tunnels/<workspaceId>.json`) — never in the project. Only SHA-256 hashes of
-tokens are persisted — a stolen state file does not yield usable bearer tokens.
+(`tunnels/<workspaceId>.json`) — never in the project. Only SHA-256 hashes plus
+canonical binding metadata and its stable fingerprint are persisted in the
+owner-only global auth store — a stolen state file does not yield usable bearer
+tokens. Raw access and refresh tokens are never written.
 Recovery lease and reclaimed-stale evidence also stay in this owner-only state
 directory; neither is written to a workspace repository.
 

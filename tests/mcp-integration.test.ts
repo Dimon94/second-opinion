@@ -43,6 +43,17 @@ function expectToolOutputSchema(
   expect(Object.keys(schema?.properties ?? {})).toEqual(expect.arrayContaining(properties));
 }
 
+function issueBridgeTokens(target: Bridge, clientName: string, scopes: string[]) {
+  const client = target.authStore.registerClient({
+    clientName,
+    redirectUris: ["https://chatgpt.com/oauth/callback"],
+    baseUrl: target.localBaseUrl(),
+  });
+  return target.authStore.issueTokens({
+    identity: target.authStore.identityForClient(target.localBaseUrl(), client.clientId, scopes)!,
+  });
+}
+
 beforeAll(async () => {
   stateDir = isolateStateDir();
   root = makeTmpDir("mcp-ws");
@@ -58,10 +69,11 @@ beforeAll(async () => {
     persistRuntime: false,
     authStoreFile: path.join(makeTmpDir("auth"), "store.json"),
   });
-  const tokens = bridge.authStore.issueTokens({
-    clientId: "it-client",
-    scopes: ["workspace.read", "workspace.search", "git.read", "execution.read"],
-  });
+  const tokens = issueBridgeTokens(
+    bridge,
+    "it-client",
+    ["workspace.read", "workspace.search", "git.read", "execution.read"]
+  );
   accessToken = tokens.accessToken;
 
   client = new Client({ name: "c2c-test-client", version: "1.0.0" });
@@ -300,7 +312,7 @@ describe("MCP tools over Streamable HTTP", () => {
   });
 
   it("enforces scopes per tool", async () => {
-    const limited = bridge.authStore.issueTokens({ clientId: "limited", scopes: ["workspace.read"] });
+    const limited = issueBridgeTokens(bridge, "limited", ["workspace.read"]);
     const limitedClient = new Client({ name: "limited", version: "1.0.0" });
     const transport = new StreamableHTTPClientTransport(new URL(`${bridge.localBaseUrl()}/mcp`), {
       requestInit: { headers: { authorization: `Bearer ${limited.accessToken}` } },
@@ -396,10 +408,7 @@ describe("global bridge workspace activation", () => {
       persistRuntime: true,
       authStoreFile: path.join(stateDir, "auth.json"),
     });
-    const tokens = switchingBridge.authStore.issueTokens({
-      clientId: "switch-client",
-      scopes: ["workspace.read"],
-    });
+    const tokens = issueBridgeTokens(switchingBridge, "switch-client", ["workspace.read"]);
     const adminUrl = `${switchingBridge.localBaseUrl()}/admin/workspace`;
 
     try {

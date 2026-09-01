@@ -816,7 +816,7 @@ program
 
 program
   .command("unpair")
-  .description("Revoke ChatGPT's access to this workspace immediately")
+  .description("Revoke ChatGPT's machine-global Bridge access immediately")
   .option("-w, --workspace <path>")
   .action(async (opts: { workspace?: string }) => {
     const root = resolveWorkspace(opts.workspace);
@@ -826,9 +826,9 @@ program
       await adminFetch(runtime, "POST", "/admin/revoke-all");
     } else {
       // bridge not running: revoke directly in the persisted store
-      new AuthStore(workspace.id).revokeAll();
+      new AuthStore().revokeAll();
     }
-    check("已断开 ChatGPT 对当前项目的访问（所有令牌已吊销）");
+    check("已断开 ChatGPT 对本机全局 Bridge 的访问（所有令牌已吊销）");
   });
 
 // ---------------------------------------------------------------- logs / workspace / record

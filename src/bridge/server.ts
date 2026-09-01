@@ -92,7 +92,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     throw new Error("The bridge only binds to loopback addresses. Public exposure goes through the tunnel.");
   }
 
-  const authStore = new AuthStore(workspace.id, { file: opts.authStoreFile });
+  const authStore = new AuthStore({ file: opts.authStoreFile });
   const pairing = new PairingManager(workspace.id, { ttlMs: opts.pairingTtlMs });
   let tunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger);
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
@@ -122,7 +122,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     createOAuthRouter({
       store: authStore,
       pairing,
-      workspaceName: workspace.name,
+      getWorkspaceName: () => workspace.name,
       getBaseUrl,
       logger,
     })
@@ -134,7 +134,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   app.all(
     "/mcp",
     express.json({ limit: "8mb" }),
-    bearerAuth({ store: authStore, workspaceId: workspace.id, getBaseUrl, logger }),
+    bearerAuth({ store: authStore, getBaseUrl, logger }),
     (req: Request, res: Response) => {
       void mcpHandler(req, res);
     }

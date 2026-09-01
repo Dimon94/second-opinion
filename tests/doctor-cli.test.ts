@@ -365,9 +365,17 @@ describe("c2c doctor contract", () => {
     process.env.C2C_STATE_DIR = fixture.stateDir;
     const bridge = await startBridge({ workspaceRoot: fixture.workspace, port: 0, persistRuntime: true });
     bridges.push(bridge);
+    const oauthClient = bridge.authStore.registerClient({
+      clientName: "existing-client",
+      redirectUris: ["https://chatgpt.com/oauth/callback"],
+      baseUrl: bridge.localBaseUrl(),
+    });
     const tokens = bridge.authStore.issueTokens({
-      clientId: "existing-client",
-      scopes: ["workspace.read"],
+      identity: bridge.authStore.identityForClient(
+        bridge.localBaseUrl(),
+        oauthClient.clientId,
+        ["workspace.read"]
+      )!,
     });
     writeSession(bridge.workspace.id, {
       url: "https://chatgpt.com/c/existing",
@@ -634,6 +642,7 @@ describe("c2c doctor contract", () => {
     try {
       const unpair = await runCli("unpair", fixture.workspace, fixture.stateDir, fixture.codexHome);
       expect(unpair.status).toBe(0);
+      expect(unpair.stdout).toContain("全局 Bridge");
       expect(fs.existsSync(recoveryLeasePath(fixture.stateDir))).toBe(true);
 
       const stop = await runCli("stop", fixture.workspace, fixture.stateDir, fixture.codexHome);

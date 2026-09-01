@@ -1,5 +1,4 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
 
@@ -13,11 +12,89 @@ export const SUPPORTED_SCOPES = [
 
 export type Scope = (typeof SUPPORTED_SCOPES)[number];
 
+export interface CanonicalOAuthIdentity {
+  endpoint: string;
+  issuer: string;
+  resource: string;
+  audience: string;
+  clientId: string;
+  clientRegistration: string;
+  scopes: string[];
+  bridgeId: string;
+  fingerprint: string;
+}
+
+export type OAuthIdentityMismatchReason =
+  | "endpoint_mismatch"
+  | "resource_mismatch"
+  | "issuer_mismatch"
+  | "audience_mismatch"
+  | "client_mismatch"
+  | "scope_mismatch"
+  | "bridge_mismatch"
+  | "fingerprint_mismatch";
+
+export function canonicalOAuthIdentity(input: {
+  baseUrl: string;
+  clientId: string;
+  clientRegistration: string;
+  scopes: string[];
+  bridgeId: string;
+}): CanonicalOAuthIdentity {
+  const url = new URL(input.baseUrl);
+  const endpoint = url.origin.toLowerCase();
+  const scopes = [...new Set(input.scopes)].sort();
+  const values = {
+    endpoint,
+    issuer: endpoint,
+    resource: `${endpoint}/mcp`,
+    audience: `${endpoint}/mcp`,
+    clientId: input.clientId,
+    clientRegistration: input.clientRegistration,
+    scopes,
+    bridgeId: input.bridgeId,
+  };
+  return {
+    ...values,
+    fingerprint: `sha256:${createHash("sha256").update(JSON.stringify(values)).digest("hex")}`,
+  };
+}
+
+export function compareOAuthIdentity(
+  expected: CanonicalOAuthIdentity,
+  actual: CanonicalOAuthIdentity
+): OAuthIdentityMismatchReason | null {
+  if (expected.endpoint !== actual.endpoint) return "endpoint_mismatch";
+  if (expected.resource !== actual.resource) return "resource_mismatch";
+  if (expected.issuer !== actual.issuer) return "issuer_mismatch";
+  if (expected.audience !== actual.audience) return "audience_mismatch";
+  if (
+    expected.clientId !== actual.clientId ||
+    expected.clientRegistration !== actual.clientRegistration
+  ) {
+    return "client_mismatch";
+  }
+  if (expected.scopes.join(" ") !== actual.scopes.join(" ")) return "scope_mismatch";
+  if (expected.bridgeId !== actual.bridgeId) return "bridge_mismatch";
+  if (expected.fingerprint !== actual.fingerprint) return "fingerprint_mismatch";
+  return null;
+}
+
 export interface ClientRegistration {
   clientId: string;
   clientName?: string;
   redirectUris: string[];
   createdAt: string;
+  binding: CanonicalOAuthIdentity;
+  grantedScopes?: string[];
+}
+
+export function clientRegistrationFingerprint(
+  client: Pick<ClientRegistration, "clientId" | "redirectUris">
+): string {
+  return `sha256:${createHash("sha256")
+    .update(JSON.stringify({ clientId: client.clientId, redirectUris: [...client.redirectUris].sort() }))
+    .digest("hex")}`;
 }
 
 export interface AuthorizationCodeRecord {
@@ -26,31 +103,33 @@ export interface AuthorizationCodeRecord {
   redirectUri: string;
   codeChallenge: string;
   scopes: string[];
-  workspaceId: string;
   pairingSessionId: string;
-  resource?: string;
+  binding: CanonicalOAuthIdentity;
   expiresAt: number;
 }
 
 export interface TokenRecord {
   hash: string;
   kind: "access" | "refresh";
-  clientId: string;
-  workspaceId: string;
-  scopes: string[];
+  binding: CanonicalOAuthIdentity;
   issuedAt: number;
   expiresAt: number;
   revoked: boolean;
 }
 
 interface PersistedAuthState {
+  version: 2;
+  bridgeId: string;
   clients: ClientRegistration[];
   tokens: TokenRecord[];
 }
 
 export type VerifyTokenResult =
   | { ok: true; record: TokenRecord }
-  | { ok: false; reason: "unknown" | "expired" | "revoked" | "wrong_kind" };
+  | {
+      ok: false;
+      reason: "unknown" | "expired" | "revoked" | "wrong_kind" | OAuthIdentityMismatchReason;
+    };
 
 const ACCESS_TOKEN_TTL_MS = 60 * 60 * 1000; // 1 hour
 const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
@@ -81,19 +160,18 @@ export class AuthStore {
   private tokens = new Map<string, TokenRecord>();
   private authCodes = new Map<string, AuthorizationCodeRecord>();
   private readonly file: string;
+  bridgeId = `c2c_bridge_${randomBytes(16).toString("base64url")}`;
 
-  constructor(
-    readonly workspaceId: string,
-    opts: { file?: string } = {}
-  ) {
+  constructor(opts: { file?: string } = {}) {
     this.file =
-      opts.file ?? path.join(ensureDir(path.join(getStateDir(), "auth")), `${workspaceId}.json`);
+      opts.file ?? path.join(ensureDir(path.join(getStateDir(), "auth")), "store.json");
     this.load();
   }
 
   private load(): void {
     const data = readJsonIfExists<PersistedAuthState>(this.file);
-    if (!data) return;
+    if (!data || data.version !== 2 || typeof data.bridgeId !== "string") return;
+    this.bridgeId = data.bridgeId;
     const now = Date.now();
     for (const client of data.clients ?? []) this.clients.set(client.clientId, client);
     for (const token of data.tokens ?? []) {
@@ -104,6 +182,8 @@ export class AuthStore {
   private save(): void {
     const now = Date.now();
     const state: PersistedAuthState = {
+      version: 2,
+      bridgeId: this.bridgeId,
       clients: [...this.clients.values()],
       tokens: [...this.tokens.values()].filter((t) => !t.revoked && t.expiresAt > now),
     };
@@ -112,12 +192,20 @@ export class AuthStore {
 
   // ---- Dynamic Client Registration -------------------------------------
 
-  registerClient(input: { clientName?: string; redirectUris: string[] }): ClientRegistration {
+  registerClient(input: { clientName?: string; redirectUris: string[]; baseUrl: string }): ClientRegistration {
+    const clientId = `c2c_client_${randomBytes(12).toString("base64url")}`;
     const client: ClientRegistration = {
-      clientId: `c2c_client_${randomBytes(12).toString("base64url")}`,
+      clientId,
       clientName: input.clientName,
       redirectUris: input.redirectUris,
       createdAt: new Date().toISOString(),
+      binding: canonicalOAuthIdentity({
+        baseUrl: input.baseUrl,
+        bridgeId: this.bridgeId,
+        clientId,
+        clientRegistration: clientRegistrationFingerprint({ clientId, redirectUris: input.redirectUris }),
+        scopes: [],
+      }),
     };
     this.clients.set(client.clientId, client);
     this.save();
@@ -128,6 +216,22 @@ export class AuthStore {
     return this.clients.get(clientId);
   }
 
+  identityForClient(
+    baseUrl: string,
+    clientId: string,
+    scopes: string[]
+  ): CanonicalOAuthIdentity | null {
+    const client = this.clients.get(clientId);
+    if (!client) return null;
+    return canonicalOAuthIdentity({
+      baseUrl,
+      bridgeId: this.bridgeId,
+      clientId,
+      clientRegistration: clientRegistrationFingerprint(client),
+      scopes,
+    });
+  }
+
   // ---- Authorization codes ----------------------------------------------
 
   createAuthorizationCode(input: {
@@ -136,7 +240,7 @@ export class AuthStore {
     codeChallenge: string;
     scopes: string[];
     pairingSessionId: string;
-    resource?: string;
+    binding: CanonicalOAuthIdentity;
   }): string {
     const code = newToken("c2c_ac");
     this.authCodes.set(code, {
@@ -145,9 +249,8 @@ export class AuthStore {
       redirectUri: input.redirectUri,
       codeChallenge: input.codeChallenge,
       scopes: input.scopes,
-      workspaceId: this.workspaceId,
       pairingSessionId: input.pairingSessionId,
-      resource: input.resource,
+      binding: input.binding,
       expiresAt: Date.now() + AUTH_CODE_TTL_MS,
     });
     return code;
@@ -165,36 +268,36 @@ export class AuthStore {
   // ---- Tokens -------------------------------------------------------------
 
   issueTokens(input: {
-    clientId: string;
-    scopes: string[];
-    workspaceId?: string;
+    identity: CanonicalOAuthIdentity;
     accessTtlMs?: number;
   }): { accessToken: string; refreshToken: string | null; expiresIn: number; scopes: string[] } {
     const now = Date.now();
-    const workspaceId = input.workspaceId ?? this.workspaceId;
     const accessTtl = input.accessTtlMs ?? ACCESS_TOKEN_TTL_MS;
+    const client = this.clients.get(input.identity.clientId);
+    if (
+      client &&
+      clientRegistrationFingerprint(client) === input.identity.clientRegistration
+    ) {
+      client.grantedScopes = [...input.identity.scopes];
+    }
 
     const accessToken = newToken("c2c_at");
     this.tokens.set(sha256hex(accessToken), {
       hash: sha256hex(accessToken),
       kind: "access",
-      clientId: input.clientId,
-      workspaceId,
-      scopes: input.scopes,
+      binding: input.identity,
       issuedAt: now,
       expiresAt: now + accessTtl,
       revoked: false,
     });
 
     let refreshToken: string | null = null;
-    if (input.scopes.includes("offline_access")) {
+    if (input.identity.scopes.includes("offline_access")) {
       refreshToken = newToken("c2c_rt");
       this.tokens.set(sha256hex(refreshToken), {
         hash: sha256hex(refreshToken),
         kind: "refresh",
-        clientId: input.clientId,
-        workspaceId,
-        scopes: input.scopes,
+        binding: input.identity,
         issuedAt: now,
         expiresAt: now + REFRESH_TOKEN_TTL_MS,
         revoked: false,
@@ -205,35 +308,59 @@ export class AuthStore {
       accessToken,
       refreshToken,
       expiresIn: Math.floor(accessTtl / 1000),
-      scopes: input.scopes,
+      scopes: input.identity.scopes,
     };
   }
 
-  verifyAccessToken(token: string): VerifyTokenResult {
+  verifyAccessToken(token: string, expected: CanonicalOAuthIdentity | string): VerifyTokenResult {
     const record = this.tokens.get(sha256hex(token));
     if (!record) return { ok: false, reason: "unknown" };
     if (record.kind !== "access") return { ok: false, reason: "wrong_kind" };
     if (record.revoked) return { ok: false, reason: "revoked" };
     if (Date.now() > record.expiresAt) return { ok: false, reason: "expired" };
+    const expectedIdentity =
+      typeof expected === "string"
+        ? this.identityForClient(
+            expected,
+            record.binding.clientId,
+            this.clients.get(record.binding.clientId)?.grantedScopes ?? record.binding.scopes
+          )
+        : expected;
+    if (!expectedIdentity) return { ok: false, reason: "client_mismatch" };
+    const mismatch = compareOAuthIdentity(expectedIdentity, record.binding);
+    if (mismatch) return { ok: false, reason: mismatch };
     return { ok: true, record };
   }
 
   /** Refresh-token rotation: old refresh token is revoked, a new pair is issued. */
   refresh(
     refreshToken: string,
-    clientId: string
+    expected: { baseUrl: string; clientId: string; scopes?: string[] }
   ): { ok: true; tokens: ReturnType<AuthStore["issueTokens"]> } | { ok: false; reason: string } {
     const record = this.tokens.get(sha256hex(refreshToken));
     if (!record || record.kind !== "refresh") return { ok: false, reason: "invalid_grant" };
     if (record.revoked) return { ok: false, reason: "invalid_grant" };
     if (Date.now() > record.expiresAt) return { ok: false, reason: "invalid_grant" };
-    if (record.clientId !== clientId) return { ok: false, reason: "invalid_client" };
+    const currentScopes =
+      this.clients.get(expected.clientId)?.grantedScopes ?? record.binding.scopes;
+    const requestedScopes = expected.scopes
+      ? [...new Set(expected.scopes)].sort()
+      : currentScopes;
+    if (requestedScopes.join(" ") !== currentScopes.join(" ")) {
+      return { ok: false, reason: "scope_mismatch" };
+    }
+    const expectedIdentity = this.identityForClient(
+      expected.baseUrl,
+      expected.clientId,
+      currentScopes
+    );
+    if (!expectedIdentity) return { ok: false, reason: "client_mismatch" };
+    const mismatch = compareOAuthIdentity(expectedIdentity, record.binding);
+    if (mismatch) return { ok: false, reason: mismatch };
     record.revoked = true;
     this.tokens.delete(record.hash);
     const tokens = this.issueTokens({
-      clientId,
-      scopes: record.scopes,
-      workspaceId: record.workspaceId,
+      identity: record.binding,
     });
     return { ok: true, tokens };
   }
@@ -247,7 +374,7 @@ export class AuthStore {
     return true;
   }
 
-  /** Used by `c2c unpair`: revoke everything for this workspace. */
+  /** Used by `c2c unpair`: revoke the machine-global Connector grant. */
   revokeAll(): number {
     const count = this.tokens.size;
     this.tokens.clear();
@@ -260,19 +387,11 @@ export class AuthStore {
     return this.tokens.size;
   }
 
-  static deleteStateFile(workspaceId: string): void {
-    const file = path.join(getStateDir(), "auth", `${workspaceId}.json`);
-    try {
-      fs.rmSync(file, { force: true });
-    } catch {
-      // ignore
-    }
-  }
 }
 
-export function filterScopes(requested: string | undefined): string[] {
+export function filterScopes(requested: string | undefined): string[] | null {
   if (!requested || requested.trim() === "") return [...SUPPORTED_SCOPES];
-  const asked = requested.split(/[\s+]+/).filter(Boolean);
-  const granted = asked.filter((scope) => (SUPPORTED_SCOPES as readonly string[]).includes(scope));
-  return granted.length > 0 ? granted : [...SUPPORTED_SCOPES];
+  const asked = [...new Set(requested.split(/[\s+]+/).filter(Boolean))];
+  if (asked.some((scope) => !(SUPPORTED_SCOPES as readonly string[]).includes(scope))) return null;
+  return asked.sort();
 }
