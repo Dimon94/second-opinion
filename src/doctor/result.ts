@@ -88,6 +88,32 @@ export const DOCTOR_EXIT_STATUS: Readonly<Record<DoctorOutcome, 0 | 1 | 2>> = {
   unknown: 1,
 };
 
+export function createRecoveryLeaseDoctorResult(
+  status: "busy" | "unknown",
+  detail: string,
+  pages: DoctorChatgptRepair["pages"]
+): DoctorResult {
+  const reason: DoctorReason = status === "busy" ? "recovery_in_progress" : "probe_inconclusive";
+  return {
+    version: DOCTOR_CONTRACT_VERSION,
+    outcome: status,
+    reason,
+    repairs: [],
+    safeRetry: true,
+    nextAction: { type: "retry_wait", reason },
+    report: { recoveryLease: { ok: false, detail } },
+    chatgptRepair: {
+      needed: false,
+      connectorAction: "none",
+      connectorName: "Codex with ChatGPT",
+      mcpUrl: null,
+      previousMcpUrl: null,
+      pages,
+    },
+    namedRepair: { needed: false },
+  };
+}
+
 export function createDoctorResult(input: {
   report: Record<string, DoctorCheck>;
   repairs: string[];

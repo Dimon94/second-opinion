@@ -9,15 +9,22 @@ import fs from "node:fs";
 export function getStateDir(): string {
   const override = process.env.C2C_STATE_DIR;
   if (override && override.trim() !== "") return path.resolve(override);
-  const home = os.homedir();
-  switch (process.platform) {
+  return getDefaultStateDir(process.platform, os.homedir(), process.env);
+}
+
+export function getDefaultStateDir(
+  platform: NodeJS.Platform,
+  home: string,
+  env: { LOCALAPPDATA?: string; XDG_STATE_HOME?: string }
+): string {
+  switch (platform) {
     case "darwin":
-      return path.join(home, "Library", "Application Support", "codex-with-chatgpt");
+      return path.posix.join(home, "Library", "Application Support", "codex-with-chatgpt");
     case "win32":
-      return path.join(process.env.LOCALAPPDATA ?? path.join(home, "AppData", "Local"), "codex-with-chatgpt");
+      return path.win32.join(env.LOCALAPPDATA ?? path.win32.join(home, "AppData", "Local"), "codex-with-chatgpt");
     default: {
-      const base = process.env.XDG_STATE_HOME ?? path.join(home, ".local", "state");
-      return path.join(base, "codex-with-chatgpt");
+      const base = env.XDG_STATE_HOME ?? path.posix.join(home, ".local", "state");
+      return path.posix.join(base, "codex-with-chatgpt");
     }
   }
 }

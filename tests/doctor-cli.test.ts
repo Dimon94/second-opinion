@@ -11,8 +11,8 @@ import {
   writeRuntimeState,
   type RuntimeState,
 } from "../src/bridge/runtime.js";
-import { writeSecureJson } from "../src/config/paths.js";
-import { adminFetch, stopBridge } from "../src/process/daemon.js";
+import { getDefaultStateDir, writeSecureJson } from "../src/config/paths.js";
+import { adminFetch, ensureBridge, stopBridge } from "../src/process/daemon.js";
 import { sessionFile, writeSession } from "../src/session/state.js";
 import { SERVICE_NAME, VERSION } from "../src/version.js";
 import { Workspace } from "../src/workspace/manager.js";
@@ -26,7 +26,8 @@ interface CliResult {
   stderr: string;
 }
 
-function runDoctor(
+function runCli(
+  command: string,
   workspace: string,
   stateDir: string,
   codexHome: string,
@@ -39,7 +40,7 @@ function runDoctor(
         "--import",
         "tsx/esm",
         path.join(projectRoot, "src", "cli", "index.ts"),
-        "doctor",
+        command,
         "-w",
         workspace,
         ...args,
@@ -57,6 +58,15 @@ function runDoctor(
     child.on("error", reject);
     child.on("close", (status) => resolve({ status, stdout, stderr }));
   });
+}
+
+function runDoctor(
+  workspace: string,
+  stateDir: string,
+  codexHome: string,
+  ...args: string[]
+): Promise<CliResult> {
+  return runCli("doctor", workspace, stateDir, codexHome, ...args);
 }
 
 function isolatedWorkspace(name: string): {
@@ -83,6 +93,48 @@ function tree(dir: string): string[] {
 function parseResult(output: string): Record<string, unknown> {
   expect(output.trim().split("\n")).toHaveLength(1);
   return JSON.parse(output) as Record<string, unknown>;
+}
+
+function recoveryLeasePath(stateDir: string): string {
+  return path.join(stateDir, "recovery", "active");
+}
+
+function writeRecoveryLeaseFixture(
+  stateDir: string,
+  workspace: Workspace,
+  input: { leaseId: string; pid: number; startedAt: string; expiresAt: string }
+): void {
+  const leaseDir = recoveryLeasePath(stateDir);
+  writeSecureJson(path.join(leaseDir, "lease.json"), {
+    version: 1,
+    leaseId: input.leaseId,
+    ownerPid: input.pid,
+    startedAt: input.startedAt,
+    expiresAt: input.expiresAt,
+    workspaceId: workspace.id,
+    workspaceRoot: workspace.root,
+    phase: "bridge",
+  });
+}
+
+async function waitForFile(file: string, timeoutMs = 3000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (fs.existsSync(file)) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for ${file}`);
+}
+
+async function stopSpawnedBridge(workspace: string, stateDir: string): Promise<void> {
+  process.env.C2C_STATE_DIR = stateDir;
+  const runtime = readRuntimeState();
+  await stopBridge(workspace);
+  if (runtime) {
+    for (let attempt = 0; attempt < 20 && (await probeBridge(runtime.port, 100)); attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
 }
 
 function mcpJson<T>(result: { content?: unknown }): T {
@@ -112,6 +164,18 @@ describe("c2c doctor contract", () => {
     for (const bridge of bridges.splice(0)) await bridge.close();
     for (const dir of dirs.splice(0)) cleanup(dir);
     delete process.env.C2C_STATE_DIR;
+  });
+
+  it("resolves owner state with native macOS and Windows path semantics", () => {
+    expect(getDefaultStateDir("darwin", "/Users/alice", {})).toBe(
+      "/Users/alice/Library/Application Support/codex-with-chatgpt"
+    );
+    expect(getDefaultStateDir("win32", "C:\\Users\\alice", {})).toBe(
+      "C:\\Users\\alice\\AppData\\Local\\codex-with-chatgpt"
+    );
+    expect(getDefaultStateDir("win32", "C:\\Users\\alice", { LOCALAPPDATA: "D:\\Local Data" })).toBe(
+      "D:\\Local Data\\codex-with-chatgpt"
+    );
   });
 
   it("reports repaired then healthy through the same versioned result", async () => {
@@ -222,6 +286,186 @@ describe("c2c doctor contract", () => {
     expect(healthy.status).toBe(0);
     expect(parseResult(healthy.stdout)).toMatchObject({ outcome: "healthy", repairs: [] });
     expect(readRuntimeState(requested.id)).toEqual(active);
+  });
+
+  it.each([
+    { label: "macOS paths and the same workspace", segments: ["Library", "Application Support"], different: false },
+    { label: "Windows paths and different workspaces", segments: ["AppData", "Local"], different: true },
+  ])("serializes spawned recovery calls across $label and task homes", async ({ segments, different }) => {
+    const stateRoot = makeTmpDir("doctor-concurrent-state");
+    const stateDir = path.join(stateRoot, ...segments, "codex-with-chatgpt");
+    const firstRoot = makeTmpDir("doctor-concurrent-first");
+    const secondRoot = different ? makeTmpDir("doctor-concurrent-second") : firstRoot;
+    const firstHome = makeTmpDir("doctor-concurrent-first-home");
+    const secondHome = makeTmpDir("doctor-concurrent-second-home");
+    write(firstRoot, "README.md", "first\n");
+    if (different) write(secondRoot, "README.md", "second\n");
+    dirs.push(stateRoot, firstRoot, firstHome, secondHome, ...(different ? [secondRoot] : []));
+
+    const first = runDoctor(firstRoot, stateDir, firstHome, "--json");
+    const leaseFile = path.join(recoveryLeasePath(stateDir), "lease.json");
+    await waitForFile(leaseFile);
+    const owner = JSON.parse(fs.readFileSync(leaseFile, "utf8")) as Record<string, unknown>;
+    expect(owner).toMatchObject({
+      ownerPid: expect.any(Number),
+      startedAt: expect.any(String),
+      expiresAt: expect.any(String),
+      workspaceId: new Workspace(firstRoot).id,
+      workspaceRoot: new Workspace(firstRoot).root,
+      phase: expect.stringMatching(/^(starting|sandbox|bridge|tunnel)$/),
+    });
+    if (process.platform !== "win32") {
+      expect(fs.statSync(recoveryLeasePath(stateDir)).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(leaseFile).mode & 0o777).toBe(0o600);
+    }
+
+    const busy = await runDoctor(secondRoot, stateDir, secondHome, "--json");
+    expect(busy.status).toBe(2);
+    expect(parseResult(busy.stdout)).toMatchObject({
+      outcome: "busy",
+      reason: "recovery_in_progress",
+      safeRetry: true,
+      nextAction: { type: "retry_wait", reason: "recovery_in_progress" },
+    });
+
+    const completed = await first;
+    expect(completed.status).toBe(0);
+    expect(parseResult(completed.stdout)).toMatchObject({ outcome: "repaired" });
+    expect(fs.existsSync(recoveryLeasePath(stateDir))).toBe(false);
+    expect(tree(secondHome)).toEqual([]);
+
+    await stopSpawnedBridge(firstRoot, stateDir);
+  });
+
+  it.each([
+    {
+      label: "active even after expiry",
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date().toISOString(),
+      status: 2,
+      outcome: "busy",
+      reason: "recovery_in_progress",
+    },
+    {
+      label: "dead but not expired",
+      pid: 999_999_999,
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 300_000).toISOString(),
+      status: 2,
+      outcome: "busy",
+      reason: "recovery_in_progress",
+    },
+    {
+      label: "inconclusive",
+      pid: 0,
+      startedAt: new Date(Date.now() - 600_000).toISOString(),
+      expiresAt: new Date(Date.now() - 300_000).toISOString(),
+      status: 1,
+      outcome: "unknown",
+      reason: "probe_inconclusive",
+    },
+  ])("fails closed for a $label recovery owner", async (owner) => {
+    const fixture = isolatedWorkspace(`doctor-lease-${owner.outcome}`);
+    dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+    const workspace = new Workspace(fixture.workspace);
+    writeRecoveryLeaseFixture(fixture.stateDir, workspace, {
+      leaseId: `fixture-${owner.outcome}`,
+      pid: owner.pid,
+      startedAt: owner.startedAt,
+      expiresAt: owner.expiresAt,
+    });
+
+    const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
+    expect(result.status).toBe(owner.status);
+    expect(result.stderr).toBe("");
+    expect(parseResult(result.stdout)).toMatchObject({
+      outcome: owner.outcome,
+      reason: owner.reason,
+      safeRetry: true,
+      nextAction: { type: "retry_wait", reason: owner.reason },
+    });
+    expect(fs.existsSync(path.join(fixture.stateDir, "runtime", "global.json"))).toBe(false);
+    expect(fs.existsSync(recoveryLeasePath(fixture.stateDir))).toBe(true);
+  });
+
+  it("reclaims an expired dead owner after PID reuse and retains stale evidence", async () => {
+    const fixture = isolatedWorkspace("doctor-lease-expired");
+    dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+    const workspace = new Workspace(fixture.workspace);
+    writeRecoveryLeaseFixture(fixture.stateDir, workspace, {
+      leaseId: "expired-owner",
+      pid: process.pid,
+      startedAt: new Date(Date.now() - process.uptime() * 1000 - 60_000).toISOString(),
+      expiresAt: new Date(Date.now() - 300_000).toISOString(),
+    });
+
+    try {
+      const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
+      expect(result.status).toBe(0);
+      expect(parseResult(result.stdout)).toMatchObject({ outcome: "repaired" });
+      expect(fs.existsSync(recoveryLeasePath(fixture.stateDir))).toBe(false);
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(fixture.stateDir, "recovery", "reclaimed", "expired-owner", "reclaimed.json"),
+            "utf8"
+          )
+        )
+      ).toMatchObject({ reason: "owner_dead_and_lease_expired", reclaimedByPid: expect.any(Number) });
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(fixture.stateDir, "recovery", "reclaimed", "expired-owner", "lease.json"),
+            "utf8"
+          )
+        )
+      ).toMatchObject({ ownerPid: process.pid, phase: "bridge" });
+    } finally {
+      await stopSpawnedBridge(fixture.workspace, fixture.stateDir);
+    }
+  });
+
+  it("does not make explicit unpair or stop wait for the recovery lease", async () => {
+    const fixture = isolatedWorkspace("doctor-lease-explicit-actions");
+    dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+    process.env.C2C_STATE_DIR = fixture.stateDir;
+    await ensureBridge(fixture.workspace);
+    const workspace = new Workspace(fixture.workspace);
+    writeRecoveryLeaseFixture(fixture.stateDir, workspace, {
+      leaseId: "active-explicit-actions",
+      pid: process.pid,
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 300_000).toISOString(),
+    });
+
+    try {
+      const unpair = await runCli("unpair", fixture.workspace, fixture.stateDir, fixture.codexHome);
+      expect(unpair.status).toBe(0);
+      expect(fs.existsSync(recoveryLeasePath(fixture.stateDir))).toBe(true);
+
+      const stop = await runCli("stop", fixture.workspace, fixture.stateDir, fixture.codexHome);
+      expect(stop.status).toBe(0);
+      expect(fs.existsSync(recoveryLeasePath(fixture.stateDir))).toBe(true);
+    } finally {
+      await stopSpawnedBridge(fixture.workspace, fixture.stateDir);
+    }
+  });
+
+  it("releases the recovery lease when doctor exits with an error", async () => {
+    const fixture = isolatedWorkspace("doctor-lease-error");
+    dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+    process.env.C2C_STATE_DIR = fixture.stateDir;
+    const bridge = await startBridge({ workspaceRoot: fixture.workspace, port: 0, persistRuntime: true });
+    bridges.push(bridge);
+    const runtime = readRuntimeState();
+    expect(runtime).not.toBeNull();
+    writeRuntimeState({ ...runtime!, adminToken: "invalid-admin-token" });
+
+    const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("✗");
+    expect(fs.existsSync(recoveryLeasePath(fixture.stateDir))).toBe(false);
   });
 
   it.each(["missing", "dead"] as const)(

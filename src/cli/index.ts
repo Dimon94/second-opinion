@@ -59,12 +59,14 @@ import { saveExecutionOutput } from "../execution/output.js";
 import { sanitizeDiagnosticText, sanitizeDiagnosticValue } from "../execution/sanitize.js";
 import {
   createDoctorResult,
+  createRecoveryLeaseDoctorResult,
   DOCTOR_EXIT_STATUS,
   renderDoctorResult,
   type DoctorChatgptRepair,
   type DoctorCheck,
   type DoctorNamedRepair,
 } from "../doctor/result.js";
+import { acquireRecoveryLease, type RecoveryLeaseHandle } from "../doctor/lease.js";
 
 const program = new Command();
 
@@ -434,13 +436,53 @@ program
     const shouldFix = opts.fix && !opts.diagnoseOnly;
     const report: Record<string, DoctorCheck> = {};
     const results: string[] = [];
+    let recoveryLease: RecoveryLeaseHandle | null = null;
+
+    if (shouldFix) {
+      let requested: Workspace | null = null;
+      try {
+        requested = new Workspace(root);
+      } catch {
+        // Workspace validation below renders the existing structured error.
+      }
+      if (requested) {
+        const acquisition = acquireRecoveryLease({
+          workspaceId: requested.id,
+          workspaceRoot: requested.root,
+        });
+        if (acquisition.status !== "acquired") {
+          const result = createRecoveryLeaseDoctorResult(
+            acquisition.status,
+            acquisition.status === "busy"
+              ? "另一个恢复正在进行，请稍后安全重试"
+              : "恢复 owner 状态无法安全确认，未执行任何修复",
+            {
+              developerMode: CHATGPT_DEVELOPER_MODE_URL,
+              plugins: CHATGPT_PLUGINS_URL,
+              createConnector: CHATGPT_CREATE_CONNECTOR_URL,
+            }
+          );
+          process.exitCode = DOCTOR_EXIT_STATUS[result.outcome];
+          say(
+            opts.json
+              ? JSON.stringify(sanitizeDiagnosticValue(result))
+              : sanitizeDiagnosticText(renderDoctorResult(result, PRODUCT_NAME, { recoveryLease: "Recovery" }))
+          );
+          return;
+        }
+        recoveryLease = acquisition.lease;
+      }
+    }
+
+    try {
 
     // Node
     const nodeMajor = parseInt(process.versions.node.split(".")[0], 10);
     report.node = { ok: nodeMajor >= 20, detail: `v${process.versions.node}` };
 
     // Codex sandbox writable_roots (so later chats do not need elevation)
-    if (shouldFix) {
+    if (shouldFix && recoveryLease) {
+      recoveryLease.updatePhase("sandbox");
       const sandbox = trySandboxAllow();
       if (sandbox.ok) {
         report.sandbox = { ok: true, detail: sandbox.alreadyAllowed ? "已在白名单" : "已写入白名单" };
@@ -469,6 +511,7 @@ program
     }
 
     // Bridge
+    recoveryLease?.updatePhase("bridge");
     let runtime: RuntimeState | null = null;
     let bridgeUnknown = false;
     let bridgeStopped = false;
@@ -477,7 +520,7 @@ program
       if (observation.state === "unknown") {
         bridgeUnknown = true;
         report.bridge = { ok: false, detail: `状态无法确认（${observation.reason}），未自动修复` };
-      } else if (shouldFix) {
+      } else if (shouldFix && recoveryLease) {
         try {
           const ensured = await ensureBridge(root);
           runtime = ensured.runtime;
@@ -520,6 +563,7 @@ program
     // Tunnel + remote reachability. If this workspace once had a public URL,
     // a full quit reclaims it — restore a tunnel and tell the Skill to update
     // the existing ChatGPT connector (never treat that as "local mode").
+    recoveryLease?.updatePhase("tunnel");
     const lastEndpoint = workspace ? readLastEndpoint(workspace.id) : null;
     const connectorName = workspace
       ? connectorNameFor({
@@ -559,7 +603,7 @@ program
         }
       }
 
-      if ((!currentUrl || !healthy) && shouldFix && (expectedPublic || info.tunnel.running)) {
+      if ((!currentUrl || !healthy) && shouldFix && recoveryLease && (expectedPublic || info.tunnel.running)) {
         try {
           const binaries = detectTunnelBinaries();
           if (!binaries.cloudflared) {
@@ -585,7 +629,7 @@ program
         report.tunnel = { ok: true, detail: currentUrl };
         const nextMcp = mcpUrlFromPublic(currentUrl);
         const action = connectorAction(lastEndpoint?.mcpUrl, nextMcp);
-        const boundName = nextMcp && shouldFix
+        const boundName = nextMcp && shouldFix && recoveryLease
           ? persistWorkspaceEndpoint({
               workspaceId: info.workspaceId,
               workspaceName: info.workspaceName,
@@ -664,6 +708,9 @@ program
         ? JSON.stringify(sanitizeDiagnosticValue(result))
         : sanitizeDiagnosticText(renderDoctorResult(result, PRODUCT_NAME, labels))
     );
+    } finally {
+      recoveryLease?.release();
+    }
   });
 
 // ---------------------------------------------------------------- pair / unpair

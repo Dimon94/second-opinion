@@ -31,6 +31,7 @@
 | Log credential leakage | Logger redacts token prefixes, bearer headers, token-like parameters, and pairing-code-shaped strings before writing |
 | Execution output leak | Codex may nominate test/build/lint logs; a local sanitizer redacts tokens, pairing-code-shaped strings and home paths, truncates size, and refuses private-key blocks entirely. Restricted items are listed without a body. ChatGPT still cannot run commands. |
 | Checkpoint / resume dump | Session checkpoints store short protocol fields only (capped). Resume uses the existing chat or HANDOFF — no new protocol state, no log paste, no re-pairing. |
+| Concurrent recovery | One owner-only machine-global lease serializes doctor mutations. A live or inconclusive owner is never displaced; only an expired lease plus a PID identity proven dead or reused permits reclaim. |
 
 ## Token & scope design
 
@@ -47,6 +48,8 @@ State lives under the OS-convention app dir
 files 0600. Named-hostname preference and tunnel metadata live there too
 (`tunnels/<workspaceId>.json`) — never in the project. Only SHA-256 hashes of
 tokens are persisted — a stolen state file does not yield usable bearer tokens.
+Recovery lease and reclaimed-stale evidence also stay in this owner-only state
+directory; neither is written to a workspace repository.
 
 **V1 limitation**: client registrations and token hashes are file-based rather
 than OS-keychain-based. Raw tokens are never written anywhere. Keychain

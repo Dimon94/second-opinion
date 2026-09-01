@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
+import { observeProcess } from "../process/liveness.js";
 import { SERVICE_NAME, VERSION } from "../version.js";
 
 /**
@@ -72,16 +73,6 @@ export type BridgeObservation =
   | { state: "stopped"; runtime: RuntimeState | null; reason: "runtime_missing" | "pid_missing" }
   | { state: "unknown"; runtime: RuntimeState | null; reason: "probe_failed" | "pid_unknown" | "workspace_mismatch" };
 
-function observePid(pid: number): "present" | "missing" | "unknown" {
-  if (!Number.isInteger(pid) || pid <= 0) return "unknown";
-  try {
-    process.kill(pid, 0);
-    return "present";
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ESRCH" ? "missing" : "unknown";
-  }
-}
-
 /**
  * Distinguish a dead bridge from a probe that simply failed.
  * Read-only: never starts, stops, or clears runtime.
@@ -98,8 +89,8 @@ export async function findBridgeObservation(_workspaceId?: string): Promise<Brid
     return { state: "unknown", runtime, reason: "workspace_mismatch" };
   }
 
-  const pid = observePid(runtime.pid);
-  if (pid === "missing") return { state: "stopped", runtime, reason: "pid_missing" };
+  const pid = observeProcess(runtime.pid);
+  if (pid === "dead") return { state: "stopped", runtime, reason: "pid_missing" };
   return { state: "unknown", runtime, reason: pid === "unknown" ? "pid_unknown" : "probe_failed" };
 }
 
