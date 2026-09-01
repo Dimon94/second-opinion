@@ -2,9 +2,18 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { startBridge } from "../src/bridge/server.js";
-import { writeRuntimeState, type RuntimeState } from "../src/bridge/runtime.js";
+import {
+  probeBridge,
+  readRuntimeState,
+  writeRuntimeState,
+  type RuntimeState,
+} from "../src/bridge/runtime.js";
 import { writeSecureJson } from "../src/config/paths.js";
+import { adminFetch, stopBridge } from "../src/process/daemon.js";
+import { sessionFile, writeSession } from "../src/session/state.js";
 import { SERVICE_NAME, VERSION } from "../src/version.js";
 import { Workspace } from "../src/workspace/manager.js";
 import { cleanup, makeTmpDir, write } from "./helpers.js";
@@ -76,6 +85,11 @@ function parseResult(output: string): Record<string, unknown> {
   return JSON.parse(output) as Record<string, unknown>;
 }
 
+function mcpJson<T>(result: { content?: unknown }): T {
+  const content = result.content as { type: string; text: string }[];
+  return JSON.parse(content[0].text) as T;
+}
+
 function runtimeFor(workspace: Workspace, pid: number): RuntimeState {
   return {
     service: SERVICE_NAME,
@@ -140,6 +154,108 @@ describe("c2c doctor contract", () => {
       nextAction: { type: "none" },
     });
   });
+
+  it("activates the requested workspace without replacing the healthy global bridge", async () => {
+    const fixture = isolatedWorkspace("doctor-switch");
+    const requestedRoot = makeTmpDir("doctor-switch-target");
+    write(requestedRoot, "target.txt", "target\n");
+    dirs.push(fixture.workspace, requestedRoot, fixture.stateDir, fixture.codexHome);
+    process.env.C2C_STATE_DIR = fixture.stateDir;
+    const bridge = await startBridge({ workspaceRoot: fixture.workspace, port: 0, persistRuntime: true });
+    bridges.push(bridge);
+    const tokens = bridge.authStore.issueTokens({
+      clientId: "existing-client",
+      scopes: ["workspace.read"],
+    });
+    writeSession(bridge.workspace.id, {
+      url: "https://chatgpt.com/c/existing",
+      conversationMode: "long-chat",
+      savedAt: new Date().toISOString(),
+    });
+    const sessionBefore = fs.readFileSync(sessionFile(bridge.workspace.id), "utf8");
+    const before = readRuntimeState(bridge.workspace.id);
+    expect(before).not.toBeNull();
+    const tokenCount = bridge.authStore.tokenCount();
+    const tunnel = bridge.tunnel.status();
+
+    const repaired = await runDoctor(requestedRoot, fixture.stateDir, fixture.codexHome, "--json");
+    expect(repaired.status).toBe(0);
+    expect(parseResult(repaired.stdout)).toMatchObject({
+      outcome: "repaired",
+      reason: "local_repairs_completed",
+      nextAction: { type: "none" },
+    });
+
+    const requested = new Workspace(requestedRoot);
+    const active = readRuntimeState(requested.id);
+    expect(active).toMatchObject({
+      workspaceId: requested.id,
+      workspaceRoot: requested.root,
+      pid: before?.pid,
+      port: before?.port,
+      adminToken: before?.adminToken,
+      startedAt: before?.startedAt,
+    });
+    expect(await adminFetch<{ workspaceId: string }>(active!, "GET", "/admin/info")).toMatchObject({
+      workspaceId: requested.id,
+    });
+    expect(bridge.authStore.tokenCount()).toBe(tokenCount);
+    expect(bridge.tunnel.status()).toEqual(tunnel);
+    expect(fs.readFileSync(sessionFile(before!.workspaceId), "utf8")).toBe(sessionBefore);
+
+    const client = new Client({ name: "doctor-switch-client", version: "1.0.0" });
+    const transport = new StreamableHTTPClientTransport(new URL(`${bridge.localBaseUrl()}/mcp`), {
+      requestInit: { headers: { authorization: `Bearer ${tokens.accessToken}` } },
+    });
+    await client.connect(transport);
+    try {
+      const info = mcpJson<{ workspaceId: string }>(
+        await client.callTool({ name: "workspace_info", arguments: {} })
+      );
+      expect(info.workspaceId).toBe(requested.id);
+      expect((await client.listTools()).tools).toHaveLength(9);
+    } finally {
+      await client.close();
+    }
+
+    const healthy = await runDoctor(requestedRoot, fixture.stateDir, fixture.codexHome, "--json");
+    expect(healthy.status).toBe(0);
+    expect(parseResult(healthy.stdout)).toMatchObject({ outcome: "healthy", repairs: [] });
+    expect(readRuntimeState(requested.id)).toEqual(active);
+  });
+
+  it.each(["missing", "dead"] as const)(
+    "starts one replacement when the global runtime is %s",
+    async (initialState) => {
+      const fixture = isolatedWorkspace(`doctor-${initialState}`);
+      dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+      process.env.C2C_STATE_DIR = fixture.stateDir;
+      const workspace = new Workspace(fixture.workspace);
+      if (initialState === "dead") writeRuntimeState(runtimeFor(workspace, 999_999_999));
+
+      try {
+        const repaired = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
+        expect(repaired.status).toBe(0);
+        expect(parseResult(repaired.stdout)).toMatchObject({ outcome: "repaired" });
+        const replacement = readRuntimeState(workspace.id);
+        if (initialState === "dead") expect(replacement?.pid).not.toBe(999_999_999);
+        expect(replacement?.pid).toBeGreaterThan(0);
+
+        const healthy = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
+        expect(healthy.status).toBe(0);
+        expect(parseResult(healthy.stdout)).toMatchObject({ outcome: "healthy", repairs: [] });
+        expect(readRuntimeState(workspace.id)?.pid).toBe(replacement?.pid);
+      } finally {
+        const runtime = readRuntimeState(workspace.id);
+        await stopBridge(fixture.workspace);
+        if (runtime) {
+          for (let attempt = 0; attempt < 20 && (await probeBridge(runtime.port, 100)); attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+        }
+      }
+    }
+  );
 
   it("reports a stopped bridge without mutating diagnose-only state or leaking sensitive output", async () => {
     const fixture = isolatedWorkspace("doctor-stopped");

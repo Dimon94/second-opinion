@@ -4,8 +4,9 @@ import { getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.
 import { SERVICE_NAME, VERSION } from "../version.js";
 
 /**
- * Runtime state file: how the CLI/Skill finds a running bridge for a
- * workspace. Contains the admin token, so it is 0600 and lives in the user
+ * Runtime state file: how the CLI/Skill finds the one machine-global bridge.
+ * The workspace fields identify its current canonical root. Contains the
+ * admin token, so it is 0600 and lives in the user
  * state dir, never in the project.
  */
 export interface RuntimeState {
@@ -20,21 +21,21 @@ export interface RuntimeState {
   startedAt: string;
 }
 
-export function runtimeFile(workspaceId: string): string {
-  return path.join(getStateDir(), "runtime", `${workspaceId}.json`);
+export function runtimeFile(_workspaceId?: string): string {
+  return path.join(getStateDir(), "runtime", "global.json");
 }
 
 export function writeRuntimeState(state: RuntimeState): void {
   writeSecureJson(runtimeFile(state.workspaceId), state);
 }
 
-export function readRuntimeState(workspaceId: string): RuntimeState | null {
-  return readJsonIfExists<RuntimeState>(runtimeFile(workspaceId));
+export function readRuntimeState(_workspaceId?: string): RuntimeState | null {
+  return readJsonIfExists<RuntimeState>(runtimeFile());
 }
 
-export function clearRuntimeState(workspaceId: string): void {
+export function clearRuntimeState(_workspaceId?: string): void {
   try {
-    fs.rmSync(runtimeFile(workspaceId), { force: true });
+    fs.rmSync(runtimeFile(), { force: true });
   } catch {
     // ignore
   }
@@ -47,7 +48,7 @@ export interface HealthPayload {
   status: string;
 }
 
-/** Probe a port and check whether a healthy c2c bridge for the workspace answers. */
+/** Probe a port and check whether a healthy c2c bridge answers. */
 export async function probeBridge(
   port: number,
   timeoutMs = 2000
@@ -85,12 +86,12 @@ function observePid(pid: number): "present" | "missing" | "unknown" {
  * Distinguish a dead bridge from a probe that simply failed.
  * Read-only: never starts, stops, or clears runtime.
  */
-export async function findBridgeObservation(workspaceId: string): Promise<BridgeObservation> {
-  const runtime = readRuntimeState(workspaceId);
+export async function findBridgeObservation(_workspaceId?: string): Promise<BridgeObservation> {
+  const runtime = readRuntimeState();
   if (!runtime) return { state: "stopped", runtime: null, reason: "runtime_missing" };
 
   const health = await probeBridge(runtime.port);
-  if (health && health.workspaceId === workspaceId) {
+  if (health && health.workspaceId === runtime.workspaceId) {
     return { state: "healthy", runtime };
   }
   if (health) {

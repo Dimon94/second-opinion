@@ -474,17 +474,26 @@ program
     let bridgeStopped = false;
     if (workspace) {
       const observation = await findBridgeObservation(workspace.id);
-      if (observation.state === "healthy") {
-        runtime = observation.runtime;
-      } else if (observation.state === "unknown") {
+      if (observation.state === "unknown") {
         bridgeUnknown = true;
         report.bridge = { ok: false, detail: `状态无法确认（${observation.reason}），未自动修复` };
       } else if (shouldFix) {
         try {
-          runtime = (await ensureBridge(root)).runtime;
-          results.push("已自动启动 Bridge");
+          const ensured = await ensureBridge(root);
+          runtime = ensured.runtime;
+          if (ensured.spawned) results.push("已自动启动 Bridge");
+          else if (ensured.activated) results.push("已激活目标 Workspace");
         } catch (error) {
           report.bridge = { ok: false, detail: (error as Error).message };
+        }
+      } else if (observation.state === "healthy") {
+        if (
+          observation.runtime.workspaceId === workspace.id &&
+          observation.runtime.workspaceRoot === workspace.root
+        ) {
+          runtime = observation.runtime;
+        } else {
+          report.bridge = { ok: false, detail: "当前 Bridge 未激活请求的 Workspace" };
         }
       } else {
         bridgeStopped = true;
@@ -538,17 +547,6 @@ program
 
     if (runtime) {
       let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-      if (namedReady && shouldFix && info.tunnel.provider !== "cloudflare-named") {
-        await stopBridge(root);
-        await new Promise((resolve) => setTimeout(resolve, 400));
-        try {
-          runtime = (await ensureBridge(root)).runtime;
-          info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-          results.push("已切换到固定域名连接");
-        } catch (error) {
-          report.tunnel = { ok: false, detail: (error as Error).message };
-        }
-      }
       const expectedPublic = Boolean(lastEndpoint?.publicUrl) || namedReady;
       let currentUrl = info.publicUrl ?? info.tunnel.url;
       let healthy = false;

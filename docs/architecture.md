@@ -34,7 +34,7 @@
 - **Computer Use = control plane**: tiny `[C2C]` state messages (< 1 KB).
 - **MCP = data plane**: ChatGPT pulls files/diffs/search results itself.
 - **Read-only by design**: no write/exec tools exist in V1 at all.
-- **Workspace is the security boundary**: one bridge = one workspace = one token audience.
+- **Workspace is the data boundary**: one machine-global bridge serves one locally selected canonical workspace at a time.
 
 ## Components (src/)
 
@@ -62,10 +62,12 @@
 `/oauth/authorize` (HTML pairing page) → pairing code verified → 302 with
 authorization code → `/oauth/token` (PKCE S256) → access + refresh tokens.
 
-**Ports**: prefer 48765, bind 127.0.0.1 only. On conflict, `/health` identifies
-whether the occupant is a c2c bridge for the same workspace (reuse) or not
-(fall back to an ephemeral port). Configuration follows automatically via the
-runtime state file; users never see ports.
+**Ports and workspace activation**: prefer 48765 and bind 127.0.0.1 only. The
+CLI observes one machine-global runtime record. A healthy bridge is reused and
+the requested canonical workspace is activated through the loopback,
+admin-token-protected API; its PID, port, tunnel and authorization state stay
+unchanged. Only a missing runtime or a positively dead PID permits a replacement
+process. The runtime record follows the active workspace; users never see ports.
 
 **Tunnel**: default is a Cloudflare Quick Tunnel (`cloudflared tunnel --url …`).
 The URL changes per start, so `c2c doctor` can restart it and tell the Skill to

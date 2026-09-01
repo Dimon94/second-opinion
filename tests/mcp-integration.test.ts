@@ -4,6 +4,8 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { startBridge, type Bridge } from "../src/bridge/server.js";
+import { readRuntimeState } from "../src/bridge/runtime.js";
+import { Workspace } from "../src/workspace/manager.js";
 import { appendExecutionRecord } from "../src/execution/records.js";
 import { saveExecutionOutput } from "../src/execution/output.js";
 import { makeTmpDir, cleanup, write, makeGitRepo, git, isolateStateDir } from "./helpers.js";
@@ -375,5 +377,109 @@ describe("MCP tools over Streamable HTTP", () => {
     expect(result.diff).not.toContain("src/public.txt");
 
     git(root, "reset", "--hard", "HEAD");
+  });
+});
+
+describe("global bridge workspace activation", () => {
+  it("allows only the local admin surface to switch the canonical MCP root", async () => {
+    const previousStateDir = process.env.C2C_STATE_DIR;
+    const stateDir = makeTmpDir("switch-state");
+    const rootA = makeTmpDir("switch-a");
+    const rootB = makeTmpDir("switch-b");
+    process.env.C2C_STATE_DIR = stateDir;
+    makeGitRepo(rootA);
+    makeGitRepo(rootB);
+    write(rootB, "only-b.txt", "active workspace b\n");
+    const switchingBridge = await startBridge({
+      workspaceRoot: rootA,
+      port: 0,
+      persistRuntime: true,
+      authStoreFile: path.join(stateDir, "auth.json"),
+    });
+    const tokens = switchingBridge.authStore.issueTokens({
+      clientId: "switch-client",
+      scopes: ["workspace.read"],
+    });
+    const adminUrl = `${switchingBridge.localBaseUrl()}/admin/workspace`;
+
+    try {
+      for (const request of [
+        { headers: { "content-type": "application/json" } },
+        {
+          headers: {
+            authorization: `Bearer ${tokens.accessToken}`,
+            "content-type": "application/json",
+          },
+        },
+        {
+          headers: {
+            authorization: `Bearer ${switchingBridge.adminToken}`,
+            "content-type": "application/json",
+            "x-forwarded-for": "203.0.113.1",
+          },
+        },
+      ]) {
+        const denied = await fetch(adminUrl, {
+          method: "POST",
+          headers: request.headers,
+          body: JSON.stringify({ workspaceRoot: rootB }),
+        });
+        expect(denied.status).toBe(404);
+      }
+
+      const switched = await fetch(adminUrl, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${switchingBridge.adminToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ workspaceRoot: rootB }),
+      });
+      expect(switched.status).toBe(200);
+      const workspaceB = new Workspace(rootB);
+      expect(await switched.json()).toMatchObject({
+        workspaceId: workspaceB.id,
+        workspaceRoot: workspaceB.root,
+      });
+      expect(readRuntimeState(workspaceB.id)).toMatchObject({
+        workspaceId: workspaceB.id,
+        workspaceRoot: workspaceB.root,
+        pid: process.pid,
+        port: switchingBridge.port,
+      });
+      expect(switchingBridge.workspace.id).toBe(workspaceB.id);
+
+      const switchedClient = new Client({ name: "switch-test-client", version: "1.0.0" });
+      const transport = new StreamableHTTPClientTransport(new URL(`${switchingBridge.localBaseUrl()}/mcp`), {
+        requestInit: { headers: { authorization: `Bearer ${tokens.accessToken}` } },
+      });
+      await switchedClient.connect(transport);
+      try {
+        const info = jsonOf<{ workspaceId: string }>(
+          await switchedClient.callTool({ name: "workspace_info", arguments: {} })
+        );
+        expect(info.workspaceId).toBe(workspaceB.id);
+        expect(
+          jsonOf<{ content: string }>(
+            await switchedClient.callTool({ name: "read_file", arguments: { path: "only-b.txt" } })
+          ).content
+        ).toContain("active workspace b");
+
+        const escaped = await switchedClient.callTool({
+          name: "read_file",
+          arguments: { path: path.join(rootA, "hello.txt") },
+        });
+        expect(escaped.isError).toBe(true);
+        expect(textOf(escaped)).toContain("PATH_OUTSIDE_WORKSPACE");
+      } finally {
+        await switchedClient.close();
+      }
+    } finally {
+      await switchingBridge.close();
+      process.env.C2C_STATE_DIR = previousStateDir;
+      cleanup(stateDir);
+      cleanup(rootA);
+      cleanup(rootB);
+    }
   });
 });

@@ -81,7 +81,7 @@ function listen(app: express.Express, host: string, preferredPort: number): Prom
 
 export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   const logger = opts.logger ?? nullLogger;
-  const workspace = new Workspace(opts.workspaceRoot);
+  let workspace = new Workspace(opts.workspaceRoot);
   const host = opts.host ?? DEFAULT_HOST;
   if (host !== "127.0.0.1" && host !== "::1" && host !== "localhost") {
     throw new Error("The bridge only binds to loopback addresses. Public exposure goes through the tunnel.");
@@ -151,6 +151,34 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     next();
   };
 
+  app.post(
+    "/admin/workspace",
+    adminGuard,
+    express.json({ limit: "8kb" }),
+    (req: Request, res: Response) => {
+      if (typeof req.body?.workspaceRoot !== "string") {
+        res.status(400).json({ error: "invalid_workspace", message: "workspaceRoot is required" });
+        return;
+      }
+      try {
+        const nextWorkspace = new Workspace(req.body.workspaceRoot);
+        persistRuntime(nextWorkspace);
+        workspace = nextWorkspace;
+        logger.info(`Activated workspace ${workspace.name} (${workspace.id})`);
+        res.json({
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+          workspaceRoot: workspace.root,
+        });
+      } catch (error) {
+        res.status(400).json({
+          error: "invalid_workspace",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  );
+
   app.post("/admin/pairing", adminGuard, (_req, res) => {
     const session = pairing.create();
     logger.info("Created pairing session");
@@ -214,13 +242,13 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   const startedAt = new Date().toISOString();
   logger.info(`Bridge listening on ${host}:${port} for workspace ${workspace.name} (${workspace.id})`);
 
-  const persistRuntime = (): void => {
+  const persistRuntime = (activeWorkspace = workspace): void => {
     if (opts.persistRuntime === false) return;
     const state: RuntimeState = {
       service: SERVICE_NAME,
       version: VERSION,
-      workspaceId: workspace.id,
-      workspaceRoot: workspace.root,
+      workspaceId: activeWorkspace.id,
+      workspaceRoot: activeWorkspace.root,
       pid: process.pid,
       port,
       adminToken,
@@ -242,7 +270,9 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   };
 
   return {
-    workspace,
+    get workspace() {
+      return workspace;
+    },
     port,
     host,
     adminToken,

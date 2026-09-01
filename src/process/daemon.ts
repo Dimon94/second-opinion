@@ -23,6 +23,7 @@ function cliEntry(): { cmd: string; args: string[] } {
 export interface EnsureBridgeResult {
   runtime: RuntimeState;
   spawned: boolean;
+  activated: boolean;
 }
 
 /**
@@ -32,7 +33,22 @@ export interface EnsureBridgeResult {
 export async function ensureBridge(workspaceRoot: string, opts: { port?: number } = {}): Promise<EnsureBridgeResult> {
   const workspace = new Workspace(workspaceRoot);
   const observation = await findBridgeObservation(workspace.id);
-  if (observation.state === "healthy") return { runtime: observation.runtime, spawned: false };
+  if (observation.state === "healthy") {
+    if (
+      observation.runtime.workspaceId === workspace.id &&
+      observation.runtime.workspaceRoot === workspace.root
+    ) {
+      return { runtime: observation.runtime, spawned: false, activated: false };
+    }
+    await adminFetch(observation.runtime, "POST", "/admin/workspace", 60_000, {
+      workspaceRoot: workspace.root,
+    });
+    const runtime = readRuntimeState();
+    if (!runtime || runtime.workspaceId !== workspace.id || runtime.workspaceRoot !== workspace.root) {
+      throw new Error("Bridge did not activate the requested workspace.");
+    }
+    return { runtime, spawned: false, activated: true };
+  }
   if (observation.state === "unknown") {
     throw new Error(
       `Bridge state is uncertain (${observation.reason}); refusing to start another bridge.`
@@ -67,7 +83,9 @@ export async function ensureBridge(workspaceRoot: string, opts: { port?: number 
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 300));
     const runtime = await findLiveBridge(workspace.id);
-    if (runtime) return { runtime, spawned: true };
+    if (runtime && runtime.workspaceId === workspace.id) {
+      return { runtime, spawned: true, activated: false };
+    }
     if (child.exitCode !== null && child.exitCode !== 0) {
       throw new Error(`Bridge process exited with code ${child.exitCode}. See ${logFile}`);
     }
@@ -79,32 +97,36 @@ export async function adminFetch<T = unknown>(
   runtime: RuntimeState,
   method: "GET" | "POST",
   route: string,
-  timeoutMs = 60_000
+  timeoutMs = 60_000,
+  body?: unknown
 ): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const response = await fetch(`http://127.0.0.1:${runtime.port}${route}`, {
       method,
-      headers: { Authorization: `Bearer ${runtime.adminToken}` },
+      headers: {
+        Authorization: `Bearer ${runtime.adminToken}`,
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
       signal: controller.signal,
     });
-    const body = (await response.json().catch(() => ({}))) as T & { message?: string };
+    const responseBody = (await response.json().catch(() => ({}))) as T & { message?: string };
     if (!response.ok) {
-      throw new Error((body as { message?: string }).message ?? `Admin request failed (${response.status})`);
+      throw new Error(responseBody.message ?? `Admin request failed (${response.status})`);
     }
-    return body;
+    return responseBody;
   } finally {
     clearTimeout(timer);
   }
 }
 
-export async function stopBridge(workspaceRoot: string): Promise<boolean> {
-  const workspace = new Workspace(workspaceRoot);
-  const runtime = readRuntimeState(workspace.id);
+export async function stopBridge(_workspaceRoot: string): Promise<boolean> {
+  const runtime = readRuntimeState();
   if (!runtime) return false;
   const healthy = await probeBridge(runtime.port);
-  if (healthy && healthy.workspaceId === workspace.id) {
+  if (healthy && healthy.workspaceId === runtime.workspaceId) {
     try {
       await adminFetch(runtime, "POST", "/admin/shutdown", 5000);
       return true;

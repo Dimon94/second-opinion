@@ -2,9 +2,10 @@
 
 ## Trust boundaries
 
-1. **Workspace root** is the smallest authorization boundary. One bridge serves
-   exactly one workspace; every token is bound to `workspace_id`; a token for
-   project A returns 403 on project B's bridge.
+1. **Active workspace root** is the data boundary. The machine-global bridge
+   serves exactly one canonical workspace at a time. Only the loopback admin
+   API can change that root; a bearer-authenticated MCP caller cannot choose or
+   submit a workspace and remains confined by the active root's containment checks.
 2. **Workspace content is untrusted.** README, comments, diffs may contain
    prompt injection. Every MCP tool description carries an explicit warning and
    tools never grant capabilities based on file content.
@@ -16,7 +17,7 @@
 
 | Threat | Mitigation |
 | --- | --- |
-| MCP URL leaks | URL alone is useless: every `/mcp` request requires a valid bearer token (401 without, 403 wrong workspace) |
+| MCP URL leaks | URL alone is useless: every `/mcp` request requires a valid bearer token; the token cannot select or submit a workspace root |
 | Pairing code brute force | 8 chars from a 31-char CSPRNG alphabet (~40 bits), 5 attempts per session, per-IP rate limit (10/min), 5-minute TTL, one-time use, session destroyed on limit |
 | OAuth CSRF | `state` round-tripped verbatim; authorization requests are server-side records keyed by random ids |
 | Code interception | PKCE S256 mandatory (plain rejected); authorization codes are one-time, 5-minute TTL, bound to client + redirect URI |
@@ -26,7 +27,7 @@
 | Sensitive files | Deny-by-default patterns (.env*, keys, SSH, cloud creds, keychains…) enforced at resolve time — reads, listings, and search all pass through the same gate; `git diff` adds pathspec excludes; `.env.example` allowed |
 | Oversized file / diff DoS | read_file caps lines and bytes per response; git_diff paginates by byte offset with hard caps; search caps matches and file sizes |
 | Tunnel exposure | Bridge binds 127.0.0.1 only (refuses 0.0.0.0); the only public surface is HTTPS via the tunnel, protected by OAuth; `/health` reveals only a salted workspace hash |
-| Admin API abuse | Loopback-only + random admin token (0600 runtime file) + requests with proxy headers (`cf-connecting-ip`, `x-forwarded-for`) rejected; unauthenticated probes get 404 |
+| Admin API abuse | Loopback-only + random admin token (0600 global runtime file) + requests with proxy headers (`cf-connecting-ip`, `x-forwarded-for`) rejected; unauthenticated and MCP-bearer workspace switches get 404 |
 | Log credential leakage | Logger redacts token prefixes, bearer headers, token-like parameters, and pairing-code-shaped strings before writing |
 | Execution output leak | Codex may nominate test/build/lint logs; a local sanitizer redacts tokens, pairing-code-shaped strings and home paths, truncates size, and refuses private-key blocks entirely. Restricted items are listed without a body. ChatGPT still cannot run commands. |
 | Checkpoint / resume dump | Session checkpoints store short protocol fields only (capped). Resume uses the existing chat or HANDOFF — no new protocol state, no log paste, no re-pairing. |
@@ -35,8 +36,9 @@
 
 Scopes: `workspace.read`, `workspace.search`, `git.read`, `execution.read`,
 `offline_access`. Tools enforce scopes individually (`INSUFFICIENT_SCOPE`).
-Access tokens: 1 hour. Refresh tokens: 30 days, rotated. All tokens bound to
-`workspace_id` and `client_id`.
+Access tokens: 1 hour. Refresh tokens: 30 days, rotated. Tokens remain bound to
+their issuing Bridge auth store and `client_id`; local admin activation changes
+only the canonical data root and does not rewrite authorization state.
 
 ## Storage
 
