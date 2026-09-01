@@ -108,6 +108,7 @@ export function createRecoveryLeaseDoctorResult(
     repairs: [],
     safeRetry: true,
     nextAction: { type: "retry_wait", reason },
+    conversation: null,
     report: { recoveryLease: { ok: false, detail } },
     chatgptRepair: {
       needed: false,
