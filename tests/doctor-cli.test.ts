@@ -198,7 +198,8 @@ describe("c2c doctor contract", () => {
       outcome: "repaired",
       reason: "local_repairs_completed",
       safeRetry: true,
-      nextAction: { type: "none" },
+      nextAction: { type: "create_conversation", reason: "conversation_missing" },
+      conversation: { mode: "project", workspaceId: expect.any(String) },
     });
 
     const healthy = await runDoctor(
@@ -215,15 +216,96 @@ describe("c2c doctor contract", () => {
       reason: "all_checks_passed",
       repairs: [],
       safeRetry: true,
-      nextAction: { type: "none" },
+      nextAction: { type: "create_conversation", reason: "conversation_missing" },
+      conversation: { mode: "project", workspaceId: expect.any(String) },
     });
+  });
+
+  it("returns a normalized workspace-scoped action for a saved long chat", async () => {
+    const fixture = isolatedWorkspace("doctor-conversation");
+    dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+    process.env.C2C_STATE_DIR = fixture.stateDir;
+    const bridge = await startBridge({ workspaceRoot: fixture.workspace, port: 0, persistRuntime: true });
+    bridges.push(bridge);
+    writeSecureJson(sessionFile(bridge.workspace.id), {
+      url: "https://chatgpt.com/c/WEB:saved-chat?model=auto",
+      conversationMode: "long-chat",
+      connectorName: "Codex with ChatGPT",
+      checkpoint: {
+        taskId: "c2c_ab12",
+        iteration: 3,
+        protocolState: "EXECUTED_SENT",
+        waitingFor: "GPT_REVIEW",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      savedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
+
+    expect(result.status).toBe(0);
+    expect(parseResult(result.stdout)).toMatchObject({
+      conversation: {
+        workspaceId: bridge.workspace.id,
+        mode: "long-chat",
+        chatUrl: "https://chatgpt.com/c/saved-chat",
+        connectorName: "Codex with ChatGPT",
+        reuseSavedChat: true,
+      },
+      nextAction: {
+        type: "open_conversation",
+        page: "https://chatgpt.com/c/saved-chat",
+      },
+      chatgptRepair: { needed: false, connectorAction: "none" },
+    });
+  });
+
+  it("opens the retained Project when its conversation is missing without changing bindings", async () => {
+    const fixture = isolatedWorkspace("doctor-project-missing");
+    dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+    process.env.C2C_STATE_DIR = fixture.stateDir;
+    const bridge = await startBridge({ workspaceRoot: fixture.workspace, port: 0, persistRuntime: true });
+    bridges.push(bridge);
+    const projectUrl = "https://chatgpt.com/g/g-p-abc123/project";
+    writeSession(bridge.workspace.id, {
+      conversationMode: "project",
+      projectUrl,
+      connectorName: "Codex with ChatGPT",
+      checkpoint: {
+        taskId: "c2c_ab12",
+        iteration: 4,
+        protocolState: "EXECUTED_SENT",
+        waitingFor: "GPT_REVIEW",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      savedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const before = fs.readFileSync(sessionFile(bridge.workspace.id), "utf8");
+
+    const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
+
+    expect(result.status).toBe(0);
+    expect(parseResult(result.stdout)).toMatchObject({
+      conversation: {
+        workspaceId: bridge.workspace.id,
+        mode: "project",
+        projectUrl,
+        chatUrl: null,
+        connectorName: "Codex with ChatGPT",
+      },
+      nextAction: { type: "open_conversation", reason: "conversation_missing", page: projectUrl },
+      chatgptRepair: { needed: false, connectorAction: "none" },
+    });
+    expect(fs.readFileSync(sessionFile(bridge.workspace.id), "utf8")).toBe(before);
   });
 
   it("activates the requested workspace without replacing the healthy global bridge", async () => {
     const fixture = isolatedWorkspace("doctor-switch");
     const requestedRoot = makeTmpDir("doctor-switch-target");
+    const driftRoot = makeTmpDir("doctor-switch-drift");
     write(requestedRoot, "target.txt", "target\n");
-    dirs.push(fixture.workspace, requestedRoot, fixture.stateDir, fixture.codexHome);
+    write(driftRoot, "drift.txt", "drift\n");
+    dirs.push(fixture.workspace, requestedRoot, driftRoot, fixture.stateDir, fixture.codexHome);
     process.env.C2C_STATE_DIR = fixture.stateDir;
     const bridge = await startBridge({ workspaceRoot: fixture.workspace, port: 0, persistRuntime: true });
     bridges.push(bridge);
@@ -247,7 +329,7 @@ describe("c2c doctor contract", () => {
     expect(parseResult(repaired.stdout)).toMatchObject({
       outcome: "repaired",
       reason: "local_repairs_completed",
-      nextAction: { type: "none" },
+      nextAction: { type: "create_conversation", reason: "conversation_missing" },
     });
 
     const requested = new Workspace(requestedRoot);
@@ -278,13 +360,36 @@ describe("c2c doctor contract", () => {
       );
       expect(info.workspaceId).toBe(requested.id);
       expect((await client.listTools()).tools).toHaveLength(9);
+
+      await adminFetch(active!, "POST", "/admin/workspace", 60_000, { workspaceRoot: driftRoot });
+      expect(
+        mcpJson<{ workspaceId: string }>(
+          await client.callTool({ name: "workspace_info", arguments: {} })
+        ).workspaceId
+      ).toBe(new Workspace(driftRoot).id);
+
+      const reactivated = await runDoctor(requestedRoot, fixture.stateDir, fixture.codexHome, "--json");
+      expect(reactivated.status).toBe(0);
+      expect(parseResult(reactivated.stdout)).toMatchObject({
+        outcome: "repaired",
+        nextAction: { type: "create_conversation", reason: "conversation_missing" },
+      });
+      expect(
+        mcpJson<{ workspaceId: string }>(
+          await client.callTool({ name: "workspace_info", arguments: {} })
+        ).workspaceId
+      ).toBe(requested.id);
     } finally {
       await client.close();
     }
 
     const healthy = await runDoctor(requestedRoot, fixture.stateDir, fixture.codexHome, "--json");
     expect(healthy.status).toBe(0);
-    expect(parseResult(healthy.stdout)).toMatchObject({ outcome: "healthy", repairs: [] });
+    expect(parseResult(healthy.stdout)).toMatchObject({
+      outcome: "healthy",
+      repairs: [],
+      nextAction: { type: "create_conversation", reason: "conversation_missing" },
+    });
     expect(readRuntimeState(requested.id)).toEqual(active);
   });
 
@@ -480,14 +585,21 @@ describe("c2c doctor contract", () => {
       try {
         const repaired = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
         expect(repaired.status).toBe(0);
-        expect(parseResult(repaired.stdout)).toMatchObject({ outcome: "repaired" });
+        expect(parseResult(repaired.stdout)).toMatchObject({
+          outcome: "repaired",
+          nextAction: { type: "create_conversation", reason: "conversation_missing" },
+        });
         const replacement = readRuntimeState(workspace.id);
         if (initialState === "dead") expect(replacement?.pid).not.toBe(999_999_999);
         expect(replacement?.pid).toBeGreaterThan(0);
 
         const healthy = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
         expect(healthy.status).toBe(0);
-        expect(parseResult(healthy.stdout)).toMatchObject({ outcome: "healthy", repairs: [] });
+        expect(parseResult(healthy.stdout)).toMatchObject({
+          outcome: "healthy",
+          repairs: [],
+          nextAction: { type: "create_conversation", reason: "conversation_missing" },
+        });
         expect(readRuntimeState(workspace.id)?.pid).toBe(replacement?.pid);
       } finally {
         const runtime = readRuntimeState(workspace.id);

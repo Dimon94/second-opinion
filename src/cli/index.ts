@@ -701,6 +701,9 @@ program
       namedRepair,
       bridgeStopped,
       bridgeUnknown,
+      conversation: workspace
+        ? { workspaceId: workspace.id, ...resolveConversation(readSession(workspace.id)) }
+        : null,
     });
     process.exitCode = DOCTOR_EXIT_STATUS[result.outcome];
     say(

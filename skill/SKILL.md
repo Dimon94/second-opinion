@@ -91,6 +91,8 @@ whatever data it needs by itself.
    - `report.bridge` says 状态无法确认: the local bridge may still be running.
      Do not `c2c start`, do not Delete the connector, do not treat it as
      `chatgptRepair`. Wait and run doctor again.
+   When the gate is green, navigate only to `nextAction.page` when present;
+   `conversation` is scoped to the requested `workspaceId`.
    A ChatGPT-side 401 after a sent message is different: repair then, do not
    treat it as permission to skip this gate next time.
 
@@ -368,7 +370,9 @@ ONE ChatGPT conversation per workspace. Same as before.
   `c2c session set -w <ws> --task <id> --iteration <n> --state <STATE>`
   plus checkpoint flags from the coding workflow (`--protocol-state`,
   `--waiting-for`, `--goal`, `--next-step`, `--known-issues`, or
-  `--clear-checkpoint` on DONE). Do not put logs or diffs in those fields.
+  `--clear-checkpoint` on DONE). Those fields accept short single-line
+  summaries only. Never put file contents, diffs, logs, or output bodies in
+  them.
 - **Switch it** ONLY when (a) the user asks for a new chat, (b) the current
   chat visibly lags, or (c) this conversation is Work. Then:
   1. Same iab tab: `goto` `https://chatgpt.com/`, confirm Chat mode
@@ -377,10 +381,12 @@ ONE ChatGPT conversation per workspace. Same as before.
      next step. Never paste files.
   3. workspace_info check; only then `c2c session set --url`. On failure,
      leave the old saved URL unchanged.
-- Saved chat 404s: treat as a switch. Reconstruct HANDOFF from
-  `session.checkpoint` (goal, progress, issues, next step). If there is no
-  checkpoint, use `task` / `iteration` / `lastState` and `execution_summary`
-  metadata only. Never paste logs or output bodies.
+- Saved chat 404s: run `c2c session clear -w <ws>`, then rerun doctor and
+  follow its `create_conversation` action. The clear keeps long-chat mode and
+  checkpoint. Treat the new chat as a switch and reconstruct HANDOFF from the
+  checkpoint (goal, progress, issues, next step). If there is no checkpoint,
+  use `task` / `iteration` / `lastState` and `execution_summary` metadata only.
+  Never paste logs or output bodies.
 
 ### project (new workspaces)
 
@@ -415,9 +421,10 @@ Also offer「继续用长对话」. If they pick long-chat:
 `c2c session set -w <ws> --mode long-chat` and use the long-chat path.
 If the collection 404s or the new chat is not inside the Project, same choice.
 
-**Saved chat 404s** (this thread): `goto` the collection, open a new chat
-there, boot + HANDOFF from `session.checkpoint` (no logs) + workspace_info,
-then save the new chat URL. Keep `--project-url`.
+**Saved chat 404s** (this thread): run `c2c session clear -w <ws>`, then rerun
+doctor and follow its `open_conversation` action to the retained collection.
+Open a new chat there, boot + HANDOFF from `session.checkpoint` (no logs) +
+workspace_info, then save the new chat URL. Keep `--project-url`.
 
 ### Bind Project (user creates the collection once)
 
@@ -516,13 +523,19 @@ ChatGPT's replies are expected to be substantive (see step 3). Docs: `docs/proto
    already provides. After sending a control message, wait per
    **In-app browser** §8.
 
+   After navigation and after any recovered tool call, verify `workspace_info`
+   still matches `conversation.workspaceId`. On mismatch, stop sending task
+   messages, rerun `c2c doctor -w <workspace> --json` to reactivate the local
+   workspace, then verify `workspace_info` again before continuing.
+
    **Resume from `session.checkpoint` before any INIT.** Missing checkpoint
    (legacy session): continue as a normal new/continued loop. A browser/js
    timeout is not a lost task — claim the original tab; do not INIT, re-run,
    or resend EXECUTED just because a wait timed out.
    - `EXECUTED_SENT` + `waitingFor=GPT_REVIEW`: do not INIT, do not re-run,
      do not resend EXECUTED. Stay on the saved chat and wait for review. If
-     that chat 404s: HANDOFF from checkpoint fields (no logs), then wait.
+     that chat 404s: follow Conversation management's 404 path, HANDOFF from
+     checkpoint fields (no logs), then wait.
    - `EXECUTED_LOCAL`: local work is done; only send EXECUTED (record first
      if this iteration has no record yet). Do not re-run.
    - `EXECUTING`: not finished. Continue the current PLAN if you still have

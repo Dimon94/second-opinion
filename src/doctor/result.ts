@@ -1,3 +1,5 @@
+import type { ConversationView } from "../session/state.js";
+
 export const DOCTOR_CONTRACT_VERSION = 1 as const;
 
 export type DoctorOutcome =
@@ -73,10 +75,15 @@ export interface DoctorResult {
   repairs: string[];
   safeRetry: boolean;
   nextAction: DoctorNextAction;
+  conversation: DoctorConversationDisposition | null;
   /** Kept for existing doctor JSON consumers while they move to the versioned fields. */
   report: Record<string, DoctorCheck>;
   chatgptRepair: DoctorChatgptRepair;
   namedRepair: DoctorNamedRepair;
+}
+
+export interface DoctorConversationDisposition extends ConversationView {
+  workspaceId: string;
 }
 
 export const DOCTOR_EXIT_STATUS: Readonly<Record<DoctorOutcome, 0 | 1 | 2>> = {
@@ -119,6 +126,7 @@ export function createDoctorResult(input: {
   repairs: string[];
   chatgptRepair: DoctorChatgptRepair;
   namedRepair: DoctorNamedRepair;
+  conversation: DoctorConversationDisposition | null;
   bridgeStopped: boolean;
   bridgeUnknown: boolean;
 }): DoctorResult {
@@ -128,6 +136,7 @@ export function createDoctorResult(input: {
     report: input.report,
     chatgptRepair: input.chatgptRepair,
     namedRepair: input.namedRepair,
+    conversation: null,
   } as const;
 
   if (input.bridgeUnknown) {
@@ -174,12 +183,28 @@ export function createDoctorResult(input: {
   }
   if (Object.values(input.report).every((check) => check.ok)) {
     const repaired = input.repairs.length > 0;
+    const reason = repaired ? "local_repairs_completed" : "all_checks_passed";
+    const conversation = input.conversation;
+    if (!conversation) {
+      return {
+        ...base,
+        outcome: "blocked",
+        reason: "checks_failed",
+        safeRetry: false,
+        nextAction: { type: "manual_recovery", reason: "checks_failed" },
+      };
+    }
+    const page = conversation.mode === "project" ? conversation.projectUrl : conversation.chatUrl;
+    const missing = !conversation.chatUrl;
     return {
       ...base,
       outcome: repaired ? "repaired" : "healthy",
-      reason: repaired ? "local_repairs_completed" : "all_checks_passed",
+      reason,
       safeRetry: true,
-      nextAction: { type: "none" },
+      nextAction: page
+        ? { type: "open_conversation", reason: missing ? "conversation_missing" : reason, page }
+        : { type: "create_conversation", reason: "conversation_missing" },
+      conversation,
     };
   }
   return {

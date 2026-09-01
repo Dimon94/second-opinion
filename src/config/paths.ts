@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 
 /**
  * State directory resolution, following OS conventions.
@@ -41,11 +42,17 @@ export function stateSubdir(name: string): string {
 /** Write a JSON file with owner-only permissions. */
 export function writeSecureJson(file: string, data: unknown): void {
   ensureDir(path.dirname(file));
-  fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    fs.chmodSync(file, 0o600);
-  } catch {
-    // best effort on platforms without chmod semantics
+    fs.writeFileSync(temporary, JSON.stringify(data, null, 2), { mode: 0o600, flag: "wx" });
+    try {
+      fs.chmodSync(temporary, 0o600);
+    } catch {
+      // best effort on platforms without chmod semantics
+    }
+    fs.renameSync(temporary, file);
+  } finally {
+    fs.rmSync(temporary, { force: true });
   }
 }
 

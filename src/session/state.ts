@@ -1,5 +1,5 @@
 import path from "node:path";
-import fs from "node:fs";
+import { isDeepStrictEqual } from "node:util";
 import { getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
 
 export type ConversationMode = "long-chat" | "project";
@@ -85,12 +85,42 @@ export function sessionFile(workspaceId: string): string {
 }
 
 export function readSession(workspaceId: string): SavedSession | null {
-  return readJsonIfExists<SavedSession>(sessionFile(workspaceId));
+  const session = readJsonIfExists<SavedSession>(sessionFile(workspaceId));
+  if (!session) return null;
+  const url = session.url ? normalizeConversationUrl(session.url) : null;
+  return { ...session, url: url ?? undefined };
 }
 
 export function writeSession(workspaceId: string, session: SavedSession): SavedSession {
-  writeSecureJson(sessionFile(workspaceId), session);
-  return session;
+  const url = session.url ? normalizeConversationUrl(session.url) : null;
+  if (session.url && !url) throw new Error("conversation URL must look like https://chatgpt.com/c/…");
+  const normalized = { ...session, url: url ?? undefined };
+  const previous = readJsonIfExists<SavedSession>(sessionFile(workspaceId));
+  if (previous && isDeepStrictEqual(withoutUpdateTimes(previous), withoutUpdateTimes(normalized))) {
+    return readSession(workspaceId) ?? normalized;
+  }
+  writeSecureJson(sessionFile(workspaceId), normalized);
+  return normalized;
+}
+
+function withoutUpdateTimes(session: SavedSession): unknown {
+  const { savedAt: _savedAt, checkpoint, ...rest } = session;
+  if (!checkpoint) return rest;
+  const { updatedAt: _updatedAt, ...stableCheckpoint } = checkpoint;
+  return { ...rest, checkpoint: stableCheckpoint };
+}
+
+export function normalizeConversationUrl(url: string): string | null {
+  try {
+    const parsed = new URL(url.trim());
+    if (parsed.protocol !== "https:") return null;
+    if (parsed.hostname !== "chatgpt.com" && parsed.hostname !== "www.chatgpt.com") return null;
+    const match = parsed.pathname.match(/^\/c\/(?:WEB:)?([a-zA-Z0-9_-]+)\/?$/i);
+    if (!match) return null;
+    return `https://chatgpt.com/c/${match[1]}`;
+  } catch {
+    return null;
+  }
 }
 
 export function normalizeProjectUrl(url: string): string | null {
@@ -126,6 +156,7 @@ export function resolveConversation(session: SavedSession | null): ConversationV
 
   const projectUrl = session.projectUrl ? normalizeProjectUrl(session.projectUrl) : null;
   const projectReady = Boolean(projectUrl);
+  const chatUrl = session.url ? normalizeConversationUrl(session.url) : null;
 
   if (session.conversationMode === "long-chat") {
     return {
@@ -133,9 +164,9 @@ export function resolveConversation(session: SavedSession | null): ConversationV
       reason: "existing-long-chat",
       projectUrl: null,
       projectReady: false,
-      chatUrl: session.url ?? null,
+      chatUrl,
       connectorName: session.connectorName ?? null,
-      reuseSavedChat: Boolean(session.url),
+      reuseSavedChat: Boolean(chatUrl),
     };
   }
 
@@ -145,7 +176,7 @@ export function resolveConversation(session: SavedSession | null): ConversationV
       reason: "project",
       projectUrl,
       projectReady,
-      chatUrl: session.url ?? null,
+      chatUrl,
       connectorName: session.connectorName ?? null,
       reuseSavedChat: false,
     };
@@ -156,9 +187,9 @@ export function resolveConversation(session: SavedSession | null): ConversationV
     reason: "existing-long-chat",
     projectUrl: null,
     projectReady: false,
-    chatUrl: session.url ?? null,
+    chatUrl,
     connectorName: session.connectorName ?? null,
-    reuseSavedChat: Boolean(session.url),
+    reuseSavedChat: Boolean(chatUrl),
   };
 }
 
@@ -169,8 +200,9 @@ const CHECKPOINT_LIMITS = {
   nextExpectedStep: 400,
 } as const;
 
-function capCheckpointText(value: string | undefined, max: number): string | undefined {
+function validateAndCapCheckpointSummary(value: string | undefined, max: number): string | undefined {
   if (value === undefined) return undefined;
+  if (/[\r\n]/.test(value)) throw new Error("checkpoint fields require a single-line summary, not file, diff, or log bodies");
   const trimmed = value.trim();
   if (!trimmed) return undefined;
   return trimmed.length > max ? `${trimmed.slice(0, max)}…` : trimmed;
@@ -192,7 +224,11 @@ export function mergeSession(previous: SavedSession | null, patch: SessionPatch)
     throw new Error("project mode requires --project-url");
   }
 
-  const url = patch.url ?? previous?.url;
+  const rawUrl = patch.url ?? previous?.url;
+  const url = rawUrl ? normalizeConversationUrl(rawUrl) ?? undefined : undefined;
+  if (patch.url && !url) {
+    throw new Error("conversation URL must look like https://chatgpt.com/c/…");
+  }
   const hasChat = Boolean(url);
   const hasProject = Boolean(projectUrl);
   const hasTask = Boolean(patch.taskId ?? previous?.taskId);
@@ -228,19 +264,19 @@ export function mergeSession(previous: SavedSession | null, patch: SessionPatch)
       iteration,
       protocolState,
       waitingFor,
-      originalGoal: capCheckpointText(
+      originalGoal: validateAndCapCheckpointSummary(
         patch.checkpoint.originalGoal ?? previous?.checkpoint?.originalGoal,
         CHECKPOINT_LIMITS.originalGoal
       ),
-      completedSubtasks: capCheckpointText(
+      completedSubtasks: validateAndCapCheckpointSummary(
         patch.checkpoint.completedSubtasks ?? previous?.checkpoint?.completedSubtasks,
         CHECKPOINT_LIMITS.completedSubtasks
       ),
-      knownIssues: capCheckpointText(
+      knownIssues: validateAndCapCheckpointSummary(
         patch.checkpoint.knownIssues ?? previous?.checkpoint?.knownIssues,
         CHECKPOINT_LIMITS.knownIssues
       ),
-      nextExpectedStep: capCheckpointText(
+      nextExpectedStep: validateAndCapCheckpointSummary(
         patch.checkpoint.nextExpectedStep ?? previous?.checkpoint?.nextExpectedStep,
         CHECKPOINT_LIMITS.nextExpectedStep
       ),
@@ -271,14 +307,19 @@ export function clearChatPointer(workspaceId: string): { cleared: boolean; keptP
   const view = resolveConversation(previous);
   if (view.mode === "project" && view.projectUrl) {
     writeSession(workspaceId, {
+      ...previous,
+      url: undefined,
       conversationMode: "project",
       projectUrl: view.projectUrl,
-      connectorName: previous.connectorName,
-      checkpoint: previous.checkpoint,
       savedAt: new Date().toISOString(),
     });
     return { cleared: true, keptProject: true };
   }
-  fs.rmSync(sessionFile(workspaceId), { force: true });
+  writeSession(workspaceId, {
+    ...previous,
+    url: undefined,
+    conversationMode: "long-chat",
+    savedAt: new Date().toISOString(),
+  });
   return { cleared: true, keptProject: false };
 }
