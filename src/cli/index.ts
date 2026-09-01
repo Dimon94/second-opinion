@@ -34,6 +34,7 @@ import {
   CHATGPT_PLUGINS_URL,
   connectorAction,
   connectorNameFor,
+  endpointFingerprint,
   mcpUrlFromPublic,
   normalizePublicUrl,
   readLastEndpoint,
@@ -41,7 +42,8 @@ import {
   writeLastEndpoint,
   type LastEndpoint,
 } from "../config/endpoint.js";
-import { PRODUCT_NAME, VERSION } from "../version.js";
+import { PRODUCT_NAME, SERVICE_NAME, VERSION } from "../version.js";
+import type { TunnelDoctorReport } from "../tunnel/provider.js";
 import {
   clearChatPointer,
   mergeSession,
@@ -65,6 +67,7 @@ import {
   type DoctorChatgptRepair,
   type DoctorCheck,
   type DoctorNamedRepair,
+  type DoctorTunnelResult,
 } from "../doctor/result.js";
 import { acquireRecoveryLease, type RecoveryLeaseHandle } from "../doctor/lease.js";
 
@@ -110,6 +113,36 @@ function parseChangedFiles(value: string): string[] | number {
 
 /** Local harness output only. Never pasted into ChatGPT. */
 const MAX_RECORD_OUTPUT_READ = 256 * 1024;
+
+type PublicHealth = "passed" | "failed" | "unknown" | "not_checked";
+
+async function probePublicHealth(publicUrl: string | null, workspaceId: string): Promise<PublicHealth> {
+  if (!publicUrl) return "not_checked";
+  try {
+    const response = await fetch(`${normalizePublicUrl(publicUrl)}/health`, {
+      signal: AbortSignal.timeout(8000),
+    });
+    const body = (await response.json().catch(() => null)) as {
+      service?: unknown;
+      workspaceId?: unknown;
+      status?: unknown;
+    } | null;
+    return response.ok &&
+      body?.service === SERVICE_NAME &&
+      body.workspaceId === workspaceId &&
+      body.status === "ok"
+      ? "passed"
+      : "failed";
+  } catch {
+    return "unknown";
+  }
+}
+
+function requiresCloudflareLogin(message: string): boolean {
+  return /origin certificate|cert\.pem|credentials? file|unauthorized|authentication|tunnel login/i.test(
+    message
+  );
+}
 
 function readCappedUtf8(filePath: string, maxBytes: number): string {
   const fd = fs.openSync(filePath, "r");
@@ -576,6 +609,16 @@ program
     const tunnelState = workspace ? readTunnelState(workspace.id) : null;
     const namedReady = tunnelState ? isNamedTunnelReady(tunnelState) : false;
     let namedRepair: DoctorNamedRepair = { needed: false };
+    let tunnelFailure: "cloudflared_missing" | "transport_down" | "probe_inconclusive" | undefined;
+    let currentIdentityMcp = namedReady && tunnelState?.hostname
+      ? mcpUrlFromPublic(`https://${tunnelState.hostname}`)
+      : null;
+    const tunnelResult: DoctorTunnelResult = {
+      provider: tunnelState?.provider ?? null,
+      component: "unknown",
+      cloudflareLogin: namedReady ? "not_checked" : "not_applicable",
+      publicHealth: "not_checked",
+    };
     let chatgptRepair: DoctorChatgptRepair = {
       needed: false,
       connectorAction: "none",
@@ -591,43 +634,74 @@ program
 
     if (runtime) {
       let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-      const expectedPublic = Boolean(lastEndpoint?.publicUrl) || namedReady;
+      const expectedPublic =
+        Boolean(lastEndpoint?.publicUrl) ||
+        tunnelState?.preference === "quick" ||
+        namedReady ||
+        info.tunnel.running;
       let currentUrl = info.publicUrl ?? info.tunnel.url;
-      let healthy = false;
-      if (currentUrl) {
-        try {
-          const response = await fetch(`${currentUrl}/health`, { signal: AbortSignal.timeout(8000) });
-          healthy = response.ok;
-        } catch {
-          healthy = false;
-        }
+      try {
+        const tunnelDoctor = await adminFetch<TunnelDoctorReport>(runtime, "GET", "/admin/tunnel/doctor");
+        tunnelResult.provider = tunnelDoctor.provider;
+        tunnelResult.component = tunnelDoctor.binaryFound ? "available" : "missing";
+      } catch {
+        tunnelResult.component = detectTunnelBinaries().cloudflared ? "available" : "missing";
+      }
+      if (namedReady && tunnelResult.component !== "missing") {
+        tunnelResult.cloudflareLogin = hasCloudflaredCert() ? "ready" : "required";
+      }
+      tunnelResult.publicHealth = await probePublicHealth(currentUrl, info.workspaceId);
+      if (tunnelResult.publicHealth === "passed" && tunnelResult.component !== "missing") {
+        tunnelFailure = undefined;
       }
 
-      if ((!currentUrl || !healthy) && shouldFix && recoveryLease && (expectedPublic || info.tunnel.running)) {
+      if (expectedPublic && tunnelResult.component === "missing") {
+        report.tunnel = { ok: false, detail: "NEED_CLOUDFLARED" };
+        tunnelFailure = "cloudflared_missing";
+      } else if (expectedPublic && namedReady && tunnelResult.cloudflareLogin === "required") {
+        report.tunnel = { ok: false, detail: "CLOUDFLARE_LOGIN_REQUIRED" };
+        namedRepair = { needed: true, userMessage: NAMED_REPAIR_MESSAGE };
+        tunnelFailure = undefined;
+      } else if (
+        expectedPublic &&
+        tunnelResult.publicHealth !== "passed" &&
+        shouldFix &&
+        recoveryLease &&
+        !tunnelFailure
+      ) {
         try {
-          const binaries = detectTunnelBinaries();
-          if (!binaries.cloudflared) {
-            report.tunnel = { ok: false, detail: "NEED_CLOUDFLARED" };
-          } else {
-            const started = await adminFetch<TunnelStartResponse>(runtime, "POST", "/admin/tunnel/start", 90_000);
-            if (started.url) {
-              const previousUrl = lastEndpoint?.publicUrl;
-              currentUrl = started.url;
-              healthy = true;
-              info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+          const started = await adminFetch<TunnelStartResponse>(runtime, "POST", "/admin/tunnel/start", 90_000);
+          if (started.url) {
+            const previousUrl = lastEndpoint?.publicUrl;
+            currentUrl = started.url;
+            tunnelResult.publicHealth = await probePublicHealth(currentUrl, info.workspaceId);
+            info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+            if (tunnelResult.publicHealth === "passed") {
               const sameAddress =
                 previousUrl && normalizePublicUrl(previousUrl) === normalizePublicUrl(started.url);
               results.push(sameAddress ? "已重新建立安全连接" : "已重新建立安全连接（地址已更换）");
             }
           }
         } catch (error) {
-          report.tunnel = { ok: false, detail: (error as Error).message };
+          const message = (error as Error).message;
+          report.tunnel = { ok: false, detail: message };
+          if (message.includes("NEED_CLOUDFLARED") || /cloudflared is not installed/i.test(message)) {
+            tunnelResult.component = "missing";
+            tunnelFailure = "cloudflared_missing";
+          } else if (namedReady && requiresCloudflareLogin(message)) {
+            tunnelResult.cloudflareLogin = "required";
+            namedRepair = { needed: true, userMessage: NAMED_REPAIR_MESSAGE };
+            tunnelFailure = undefined;
+          } else {
+            tunnelFailure = "probe_inconclusive";
+          }
         }
       }
 
-      if (currentUrl && healthy) {
+      if (currentUrl && tunnelResult.publicHealth === "passed") {
         report.tunnel = { ok: true, detail: currentUrl };
         const nextMcp = mcpUrlFromPublic(currentUrl);
+        currentIdentityMcp = nextMcp;
         const action = connectorAction(lastEndpoint?.mcpUrl, nextMcp);
         const boundName = nextMcp && shouldFix && recoveryLease
           ? persistWorkspaceEndpoint({
@@ -649,24 +723,14 @@ program
           mcpUrl: nextMcp,
           previousMcpUrl: lastEndpoint?.mcpUrl ?? null,
         };
-      } else if (namedReady) {
-        report.tunnel = report.tunnel ?? { ok: false, detail: "NAMED_TUNNEL_DOWN" };
-        namedRepair = { needed: true, userMessage: NAMED_REPAIR_MESSAGE };
-      } else if (expectedPublic) {
-        report.tunnel = report.tunnel ?? { ok: false, detail: "安全连接未恢复" };
-        chatgptRepair = {
-          ...chatgptRepair,
-          needed: true,
-          reason: "address_reclaimed",
-          connectorAction: "update",
-          connectorName,
-          userMessage: reclaimUserMessage(connectorName),
-          mcpUrl: null,
+      } else if (expectedPublic && !namedRepair.needed && !tunnelFailure) {
+        report.tunnel = report.tunnel ?? {
+          ok: false,
+          detail: tunnelResult.publicHealth === "failed" ? "PUBLIC_HEALTH_FAILED" : "PUBLIC_HEALTH_UNKNOWN",
         };
+        tunnelFailure = tunnelResult.publicHealth === "failed" ? "transport_down" : "probe_inconclusive";
       } else if (!currentUrl) {
         report.tunnel = { ok: true, detail: "未启用（本地模式）" };
-      } else {
-        report.tunnel = { ok: false, detail: "公网地址无法访问" };
       }
     } else if (bridgeUnknown) {
       report.tunnel = report.tunnel ?? { ok: false, detail: "Bridge 状态无法确认，未执行连接器修复" };
@@ -685,6 +749,16 @@ program
       };
     }
 
+    const previousFingerprint = endpointFingerprint(lastEndpoint?.mcpUrl);
+    const currentFingerprint = endpointFingerprint(currentIdentityMcp);
+    const endpointIdentity = {
+      changed: Boolean(
+        previousFingerprint && currentFingerprint && previousFingerprint !== currentFingerprint
+      ),
+      previousFingerprint,
+      currentFingerprint,
+    };
+
     const labels: Record<string, string> = {
       node: "Node.js",
       sandbox: "Sandbox",
@@ -699,6 +773,9 @@ program
       repairs: results,
       chatgptRepair,
       namedRepair,
+      endpointIdentity,
+      tunnel: tunnelResult,
+      tunnelFailure,
       bridgeStopped,
       bridgeUnknown,
       conversation: workspace

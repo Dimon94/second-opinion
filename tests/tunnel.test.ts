@@ -9,7 +9,10 @@ import {
   parseQuickTunnelUrl,
   type CloudflaredQuickTunnelOptions,
 } from "../src/tunnel/cloudflared.js";
-import { normalizeNamedTunnelHostname } from "../src/tunnel/cloudflared-named.js";
+import {
+  CloudflaredNamedTunnel,
+  normalizeNamedTunnelHostname,
+} from "../src/tunnel/cloudflared-named.js";
 import { hostnameSlug, parseZoneInput, suggestedNamedHostname } from "../src/tunnel/hostname.js";
 import {
   chooseQuickTunnel,
@@ -203,6 +206,34 @@ describe("CloudflaredQuickTunnel", () => {
   });
 });
 
+describe("CloudflaredQuickTunnel restart", () => {
+  it("keeps the replacement tunnel state when the old process exits late", async () => {
+    const first = new FakeCloudflaredProcess();
+    const second = new FakeCloudflaredProcess();
+    const spawnImpl = vi
+      .fn()
+      .mockReturnValueOnce(first as unknown as ChildProcess)
+      .mockReturnValueOnce(second as unknown as ChildProcess);
+    const tunnel = new CloudflaredQuickTunnel(undefined, "cloudflared", {
+      spawnImpl,
+      fetchImpl: async () => healthResponse(),
+      startTimeoutMs: 1_000,
+    });
+
+    const initial = tunnel.start(3333);
+    announceUrl(first);
+    await expect(initial).resolves.toBe(QUICK_URL);
+
+    const restarted = tunnel.restart(3333);
+    announceUrl(second);
+    await expect(restarted).resolves.toBe(QUICK_URL);
+    first.emit("exit", 0, null);
+
+    expect(tunnel.status()).toMatchObject({ running: true, url: QUICK_URL });
+    await tunnel.stop();
+  });
+});
+
 describe("normalizeNamedTunnelHostname", () => {
   it("normalizes a valid hostname", () => {
     expect(normalizeNamedTunnelHostname("Dev.GetRemi.xyz.")).toBe("dev.getremi.xyz");
@@ -212,6 +243,38 @@ describe("normalizeNamedTunnelHostname", () => {
     expect(() => normalizeNamedTunnelHostname("https://dev.getremi.xyz")).toThrow(/invalid/i);
     expect(() => normalizeNamedTunnelHostname("localhost")).toThrow(/invalid/i);
   });
+});
+
+describe("CloudflaredNamedTunnel", () => {
+  it.runIf(process.platform !== "win32")(
+    "keeps the configured hostname when the connector process restarts",
+    async () => {
+      const dir = makeTmpDir("named-tunnel-binary");
+      stateDirs.push(dir);
+      const binary = write(
+        dir,
+        "cloudflared-fixture",
+        "#!/usr/bin/env node\nprocess.stderr.write('INF Registered tunnel connection\\n');\nprocess.on('SIGTERM', () => setTimeout(() => { process.stderr.write('ERR stale named child\\n'); process.exit(0); }, 50));\nsetInterval(() => {}, 1000);\n"
+      );
+      fs.chmodSync(binary, 0o700);
+      const tunnel = new CloudflaredNamedTunnel({
+        tunnelName: "c2c-workspace",
+        hostname: "c2c-demo.example.com",
+        binaryOverride: binary,
+        startTimeoutMs: 2000,
+      });
+
+      expect(await tunnel.start(48765)).toBe("https://c2c-demo.example.com");
+      expect(await tunnel.restart(48765)).toBe("https://c2c-demo.example.com");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(tunnel.status()).toMatchObject({
+        running: true,
+        url: "https://c2c-demo.example.com",
+        detail: undefined,
+      });
+      await tunnel.stop();
+    }
+  );
 });
 
 describe("named hostname helpers", () => {

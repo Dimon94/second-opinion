@@ -12,13 +12,67 @@ import {
   type RuntimeState,
 } from "../src/bridge/runtime.js";
 import { getDefaultStateDir, writeSecureJson } from "../src/config/paths.js";
+import { writeLastEndpoint } from "../src/config/endpoint.js";
 import { adminFetch, ensureBridge, stopBridge } from "../src/process/daemon.js";
 import { sessionFile, writeSession } from "../src/session/state.js";
+import type { TunnelDoctorReport, TunnelProvider, TunnelStatus } from "../src/tunnel/provider.js";
+import { writeTunnelState } from "../src/tunnel/state.js";
 import { SERVICE_NAME, VERSION } from "../src/version.js";
 import { Workspace } from "../src/workspace/manager.js";
 import { cleanup, makeTmpDir, write } from "./helpers.js";
 
 const projectRoot = path.resolve(import.meta.dirname, "..");
+const previousOriginCert = process.env.TUNNEL_ORIGIN_CERT;
+
+class FixtureTunnel implements TunnelProvider {
+  private running = false;
+  private url: string | null = null;
+  startCalls = 0;
+
+  constructor(
+    readonly name: string,
+    private readonly nextUrl: (port: number) => string,
+    private readonly binaryFound = true,
+    private readonly startError?: string
+  ) {}
+
+  async start(localPort: number): Promise<string> {
+    this.startCalls += 1;
+    if (this.startError) throw new Error(this.startError);
+    this.running = true;
+    this.url = this.nextUrl(localPort);
+    return this.url;
+  }
+
+  async stop(): Promise<void> {
+    this.running = false;
+    this.url = null;
+  }
+
+  async restart(localPort: number): Promise<string> {
+    await this.stop();
+    return this.start(localPort);
+  }
+
+  status(): TunnelStatus {
+    return { running: this.running, url: this.url, provider: this.name };
+  }
+
+  getPublicUrl(): string | null {
+    return this.url;
+  }
+
+  async doctor(): Promise<TunnelDoctorReport> {
+    return {
+      provider: this.name,
+      binaryFound: this.binaryFound,
+      binaryPath: this.binaryFound ? "fixture-cloudflared" : null,
+      running: this.running,
+      url: this.url,
+      problems: [],
+    };
+  }
+}
 
 interface CliResult {
   status: number | null;
@@ -164,6 +218,8 @@ describe("c2c doctor contract", () => {
     for (const bridge of bridges.splice(0)) await bridge.close();
     for (const dir of dirs.splice(0)) cleanup(dir);
     delete process.env.C2C_STATE_DIR;
+    if (previousOriginCert === undefined) delete process.env.TUNNEL_ORIGIN_CERT;
+    else process.env.TUNNEL_ORIGIN_CERT = previousOriginCert;
   });
 
   it("resolves owner state with native macOS and Windows path semantics", () => {
@@ -393,6 +449,37 @@ describe("c2c doctor contract", () => {
     expect(readRuntimeState(requested.id)).toEqual(active);
   });
 
+  it("rebinds a stopped tunnel provider when the requested workspace has a named tunnel", async () => {
+    const fixture = isolatedWorkspace("doctor-switch-named");
+    const requestedRoot = makeTmpDir("doctor-switch-named-target");
+    write(requestedRoot, "README.md", "named target\n");
+    dirs.push(fixture.workspace, requestedRoot, fixture.stateDir, fixture.codexHome);
+    process.env.C2C_STATE_DIR = fixture.stateDir;
+    const requested = new Workspace(requestedRoot);
+    writeTunnelState({
+      workspaceId: requested.id,
+      preference: "named",
+      askedAt: new Date().toISOString(),
+      provider: "cloudflare-named",
+      tunnelName: `c2c-${requested.id}`,
+      hostname: "c2c-target.example.com",
+    });
+    const bridge = await startBridge({ workspaceRoot: fixture.workspace, port: 0, persistRuntime: true });
+    bridges.push(bridge);
+    expect(bridge.tunnel.name).toBe("cloudflare-quick");
+    const runtime = readRuntimeState();
+
+    await adminFetch(runtime!, "POST", "/admin/workspace", 60_000, {
+      workspaceRoot: requestedRoot,
+    });
+
+    expect(bridge.tunnel.name).toBe("cloudflare-named");
+    expect(await adminFetch(runtime!, "GET", "/admin/tunnel/doctor")).toMatchObject({
+      provider: "cloudflare-named",
+      url: null,
+    });
+  });
+
   it.each([
     { label: "macOS paths and the same workspace", segments: ["Library", "Application Support"], different: false },
     { label: "Windows paths and different workspaces", segments: ["AppData", "Local"], different: true },
@@ -612,6 +699,235 @@ describe("c2c doctor contract", () => {
       }
     }
   );
+
+  it("repairs a named tunnel at the same endpoint only after public health passes", async () => {
+    const fixture = isolatedWorkspace("doctor-named-stable");
+    dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+    process.env.C2C_STATE_DIR = fixture.stateDir;
+    process.env.TUNNEL_ORIGIN_CERT = write(fixture.stateDir, "cloudflare-cert.pem", "fixture\n");
+    const workspace = new Workspace(fixture.workspace);
+    writeTunnelState({
+      workspaceId: workspace.id,
+      preference: "named",
+      askedAt: new Date().toISOString(),
+      provider: "cloudflare-named",
+      tunnelName: `c2c-${workspace.id}`,
+      hostname: "c2c-demo.example.com",
+    });
+    const tunnel = new FixtureTunnel("cloudflare-named", (port) => `http://127.0.0.1:${port}`);
+    const bridge = await startBridge({
+      workspaceRoot: fixture.workspace,
+      port: 0,
+      persistRuntime: true,
+      tunnelProvider: tunnel,
+    });
+    bridges.push(bridge);
+    writeLastEndpoint({
+      workspaceId: workspace.id,
+      port: bridge.port,
+      publicUrl: bridge.localBaseUrl(),
+      mcpUrl: `${bridge.localBaseUrl()}/mcp`,
+      connectorName: "Codex with ChatGPT",
+    });
+
+    const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
+
+    expect(result.status).toBe(0);
+    expect(parseResult(result.stdout)).toMatchObject({
+      outcome: "repaired",
+      reason: "local_repairs_completed",
+      nextAction: { type: "create_conversation" },
+      endpointIdentity: {
+        changed: false,
+        previousFingerprint: expect.stringMatching(/^sha256:/),
+        currentFingerprint: expect.stringMatching(/^sha256:/),
+      },
+      tunnel: {
+        provider: "cloudflare-named",
+        component: "available",
+        cloudflareLogin: "ready",
+        publicHealth: "passed",
+      },
+      chatgptRepair: { needed: false, connectorAction: "none" },
+    });
+    expect(tunnel.startCalls).toBe(1);
+    expect(bridge.pairing.hasActiveSession()).toBe(false);
+  });
+
+  it("starts Quick Tunnel without Cloudflare login and reports endpoint replacement fingerprints", async () => {
+    const fixture = isolatedWorkspace("doctor-quick-rotation");
+    dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+    process.env.C2C_STATE_DIR = fixture.stateDir;
+    process.env.TUNNEL_ORIGIN_CERT = path.join(fixture.stateDir, "missing-cert.pem");
+    const workspace = new Workspace(fixture.workspace);
+    writeTunnelState({
+      workspaceId: workspace.id,
+      preference: "quick",
+      askedAt: new Date().toISOString(),
+      provider: "cloudflare-quick",
+    });
+    writeLastEndpoint({
+      workspaceId: workspace.id,
+      port: 48765,
+      publicUrl: "https://old.trycloudflare.com",
+      mcpUrl: "https://old.trycloudflare.com/mcp",
+      connectorName: "Codex with ChatGPT",
+    });
+    const tunnel = new FixtureTunnel("cloudflare-quick", (port) => `http://127.0.0.1:${port}`);
+    const bridge = await startBridge({
+      workspaceRoot: fixture.workspace,
+      port: 0,
+      persistRuntime: true,
+      tunnelProvider: tunnel,
+    });
+    bridges.push(bridge);
+
+    const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
+
+    expect(result.status).toBe(2);
+    expect(parseResult(result.stdout)).toMatchObject({
+      outcome: "user_action_required",
+      reason: "endpoint_changed",
+      nextAction: { type: "replace_connector", endpoint: `${bridge.localBaseUrl()}/mcp` },
+      endpointIdentity: {
+        changed: true,
+        previousFingerprint: "sha256:0dbfbcb78cb5d5a5",
+        currentFingerprint: expect.stringMatching(/^sha256:/),
+      },
+      tunnel: {
+        provider: "cloudflare-quick",
+        component: "available",
+        cloudflareLogin: "not_applicable",
+        publicHealth: "passed",
+      },
+      chatgptRepair: { needed: true, connectorAction: "update" },
+    });
+    expect(tunnel.startCalls).toBe(1);
+    expect(bridge.pairing.hasActiveSession()).toBe(false);
+  });
+
+  it.each([
+    { label: "the origin certificate is absent", hasCert: false, startError: undefined, startCalls: 0 },
+    {
+      label: "cloudflared rejects the saved credentials",
+      hasCert: true,
+      startError: "Cannot determine default origin certificate path; run cloudflared tunnel login",
+      startCalls: 1,
+    },
+  ])("asks for one Cloudflare login action when $label", async (scenario) => {
+    const fixture = isolatedWorkspace(`doctor-named-login-${scenario.hasCert}`);
+    dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+    process.env.C2C_STATE_DIR = fixture.stateDir;
+    process.env.TUNNEL_ORIGIN_CERT = scenario.hasCert
+      ? write(fixture.stateDir, "cloudflare-cert.pem", "fixture\n")
+      : path.join(fixture.stateDir, "missing-cert.pem");
+    const workspace = new Workspace(fixture.workspace);
+    writeTunnelState({
+      workspaceId: workspace.id,
+      preference: "named",
+      askedAt: new Date().toISOString(),
+      provider: "cloudflare-named",
+      tunnelName: `c2c-${workspace.id}`,
+      hostname: "c2c-demo.example.com",
+    });
+    writeLastEndpoint({
+      workspaceId: workspace.id,
+      port: 48765,
+      publicUrl: "https://c2c-demo.example.com",
+      mcpUrl: "https://c2c-demo.example.com/mcp",
+      connectorName: "Codex with ChatGPT",
+    });
+    const tunnel = new FixtureTunnel(
+      "cloudflare-named",
+      (port) => `http://127.0.0.1:${port}`,
+      true,
+      scenario.startError
+    );
+    const bridge = await startBridge({
+      workspaceRoot: fixture.workspace,
+      port: 0,
+      persistRuntime: true,
+      tunnelProvider: tunnel,
+    });
+    bridges.push(bridge);
+
+    const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
+
+    expect(result.status).toBe(2);
+    expect(parseResult(result.stdout)).toMatchObject({
+      outcome: "user_action_required",
+      reason: "cloudflare_login_required",
+      nextAction: { type: "cloudflare_login" },
+      endpointIdentity: { changed: false },
+      tunnel: {
+        provider: "cloudflare-named",
+        component: "available",
+        cloudflareLogin: "required",
+        publicHealth: "not_checked",
+      },
+      chatgptRepair: { needed: false, connectorAction: "none" },
+    });
+    expect(tunnel.startCalls).toBe(scenario.startCalls);
+  });
+
+  it.each([
+    {
+      label: "missing cloudflared",
+      tunnel: new FixtureTunnel("cloudflare-quick", () => "", false),
+      status: 1,
+      outcome: "blocked",
+      reason: "cloudflared_missing",
+      publicHealth: "not_checked",
+    },
+    {
+      label: "failed public health",
+      tunnel: new FixtureTunnel("cloudflare-quick", (port) => `http://127.0.0.1:${port}/missing`),
+      status: 1,
+      outcome: "blocked",
+      reason: "transport_down",
+      publicHealth: "failed",
+    },
+    {
+      label: "inconclusive public health",
+      tunnel: new FixtureTunnel("cloudflare-quick", () => "http://127.0.0.1:1"),
+      status: 1,
+      outcome: "unknown",
+      reason: "probe_inconclusive",
+      publicHealth: "unknown",
+    },
+  ])("returns a distinct structured result for $label", async (scenario) => {
+    const fixture = isolatedWorkspace(`doctor-tunnel-${scenario.outcome}`);
+    dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+    process.env.C2C_STATE_DIR = fixture.stateDir;
+    const workspace = new Workspace(fixture.workspace);
+    writeTunnelState({
+      workspaceId: workspace.id,
+      preference: "quick",
+      askedAt: new Date().toISOString(),
+      provider: "cloudflare-quick",
+    });
+    const bridge = await startBridge({
+      workspaceRoot: fixture.workspace,
+      port: 0,
+      persistRuntime: true,
+      tunnelProvider: scenario.tunnel,
+    });
+    bridges.push(bridge);
+
+    const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
+
+    expect(result.status).toBe(scenario.status);
+    expect(parseResult(result.stdout)).toMatchObject({
+      outcome: scenario.outcome,
+      reason: scenario.reason,
+      tunnel: {
+        provider: "cloudflare-quick",
+        component: scenario.reason === "cloudflared_missing" ? "missing" : "available",
+        publicHealth: scenario.publicHealth,
+      },
+      chatgptRepair: { needed: false, connectorAction: "none" },
+    });
+  });
 
   it("reports a stopped bridge without mutating diagnose-only state or leaking sensitive output", async () => {
     const fixture = isolatedWorkspace("doctor-stopped");

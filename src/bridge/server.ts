@@ -18,7 +18,12 @@ import { SERVICE_NAME, VERSION } from "../version.js";
 import { writeRuntimeState, clearRuntimeState, type RuntimeState } from "./runtime.js";
 
 function tunnelForWorkspace(workspaceId: string, logger: Logger): TunnelProvider {
-  const binding = namedTunnelBinding(readTunnelState(workspaceId));
+  return configuredTunnelForWorkspace(workspaceId, logger) ?? new CloudflaredQuickTunnel(logger);
+}
+
+function configuredTunnelForWorkspace(workspaceId: string, logger: Logger): TunnelProvider | null {
+  const state = readTunnelState(workspaceId);
+  const binding = namedTunnelBinding(state);
   if (binding) {
     return new CloudflaredNamedTunnel({
       tunnelName: binding.tunnelName,
@@ -26,7 +31,7 @@ function tunnelForWorkspace(workspaceId: string, logger: Logger): TunnelProvider
       logger,
     });
   }
-  return new CloudflaredQuickTunnel(logger);
+  return state.preference === "quick" ? new CloudflaredQuickTunnel(logger) : null;
 }
 
 export interface BridgeOptions {
@@ -89,7 +94,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
 
   const authStore = new AuthStore(workspace.id, { file: opts.authStoreFile });
   const pairing = new PairingManager(workspace.id, { ttlMs: opts.pairingTtlMs });
-  const tunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger);
+  let tunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger);
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
 
   let publicBaseUrl: string | null = null;
@@ -155,14 +160,31 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     "/admin/workspace",
     adminGuard,
     express.json({ limit: "8kb" }),
-    (req: Request, res: Response) => {
+    async (req: Request, res: Response) => {
       if (typeof req.body?.workspaceRoot !== "string") {
         res.status(400).json({ error: "invalid_workspace", message: "workspaceRoot is required" });
         return;
       }
+      let nextWorkspace: Workspace;
       try {
-        const nextWorkspace = new Workspace(req.body.workspaceRoot);
+        nextWorkspace = new Workspace(req.body.workspaceRoot);
+      } catch (error) {
+        res.status(400).json({
+          error: "invalid_workspace",
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+      try {
+        const nextTunnel = opts.tunnelProvider
+          ? null
+          : configuredTunnelForWorkspace(nextWorkspace.id, logger);
+        if (nextTunnel) {
+          await tunnel.stop();
+          publicBaseUrl = null;
+        }
         persistRuntime(nextWorkspace);
+        if (nextTunnel) tunnel = nextTunnel;
         workspace = nextWorkspace;
         logger.info(`Activated workspace ${workspace.name} (${workspace.id})`);
         res.json({
@@ -171,8 +193,13 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
           workspaceRoot: workspace.root,
         });
       } catch (error) {
-        res.status(400).json({
-          error: "invalid_workspace",
+        try {
+          persistRuntime(workspace);
+        } catch {
+          // Preserve the original activation error.
+        }
+        res.status(500).json({
+          error: "workspace_activation_failed",
           message: error instanceof Error ? error.message : String(error),
         });
       }
@@ -203,8 +230,8 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   });
 
   app.post("/admin/tunnel/start", adminGuard, (_req, res) => {
-    tunnel
-      .start(port)
+    const start = tunnel.status().running ? tunnel.restart(port) : tunnel.start(port);
+    start
       .then((url) => {
         publicBaseUrl = url;
         persistRuntime();
@@ -214,6 +241,13 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
         logger.error(`Tunnel start failed: ${error.message}`);
         res.status(500).json({ error: "tunnel_failed", message: error.message });
       });
+  });
+
+  app.get("/admin/tunnel/doctor", adminGuard, (_req, res) => {
+    void tunnel.doctor().then(
+      (report) => res.json(report),
+      (error: Error) => res.status(500).json({ error: "tunnel_probe_failed", message: error.message })
+    );
   });
 
   app.post("/admin/tunnel/stop", adminGuard, (_req, res) => {
@@ -278,7 +312,9 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     adminToken,
     authStore,
     pairing,
-    tunnel,
+    get tunnel() {
+      return tunnel;
+    },
     getPublicBaseUrl: () => publicBaseUrl,
     localBaseUrl: () => `http://${host}:${port}`,
     close: shutdown,

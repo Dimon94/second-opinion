@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { getStateDir, readJsonIfExists, writeSecureJson } from "./paths.js";
 
@@ -33,6 +34,11 @@ export function writeLastEndpoint(endpoint: Omit<LastEndpoint, "savedAt">): Last
 
 export function normalizePublicUrl(url: string): string {
   return url.trim().replace(/\/+$/, "").toLowerCase();
+}
+
+export function endpointFingerprint(url: string | null | undefined): string | null {
+  if (!url) return null;
+  return `sha256:${createHash("sha256").update(normalizePublicUrl(url)).digest("hex").slice(0, 16)}`;
 }
 
 export function mcpUrlFromPublic(publicUrl: string | null | undefined): string | null {

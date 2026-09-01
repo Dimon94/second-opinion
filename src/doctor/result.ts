@@ -22,6 +22,7 @@ export type DoctorReason =
   | "workspace_denied"
   | "conversation_missing"
   | "cloudflare_login_required"
+  | "cloudflared_missing"
   | "probe_inconclusive"
   | "checks_failed";
 
@@ -68,6 +69,19 @@ export interface DoctorNamedRepair {
   userMessage?: string;
 }
 
+export interface DoctorEndpointIdentity {
+  changed: boolean;
+  previousFingerprint: string | null;
+  currentFingerprint: string | null;
+}
+
+export interface DoctorTunnelResult {
+  provider: string | null;
+  component: "available" | "missing" | "unknown";
+  cloudflareLogin: "ready" | "required" | "not_applicable" | "not_checked";
+  publicHealth: "passed" | "failed" | "unknown" | "not_checked";
+}
+
 export interface DoctorResult {
   version: typeof DOCTOR_CONTRACT_VERSION;
   outcome: DoctorOutcome;
@@ -76,6 +90,8 @@ export interface DoctorResult {
   safeRetry: boolean;
   nextAction: DoctorNextAction;
   conversation: DoctorConversationDisposition | null;
+  endpointIdentity: DoctorEndpointIdentity;
+  tunnel: DoctorTunnelResult;
   /** Kept for existing doctor JSON consumers while they move to the versioned fields. */
   report: Record<string, DoctorCheck>;
   chatgptRepair: DoctorChatgptRepair;
@@ -109,6 +125,17 @@ export function createRecoveryLeaseDoctorResult(
     safeRetry: true,
     nextAction: { type: "retry_wait", reason },
     conversation: null,
+    endpointIdentity: {
+      changed: false,
+      previousFingerprint: null,
+      currentFingerprint: null,
+    },
+    tunnel: {
+      provider: null,
+      component: "unknown",
+      cloudflareLogin: "not_checked",
+      publicHealth: "not_checked",
+    },
     report: { recoveryLease: { ok: false, detail } },
     chatgptRepair: {
       needed: false,
@@ -128,6 +155,9 @@ export function createDoctorResult(input: {
   chatgptRepair: DoctorChatgptRepair;
   namedRepair: DoctorNamedRepair;
   conversation: DoctorConversationDisposition | null;
+  endpointIdentity: DoctorEndpointIdentity;
+  tunnel: DoctorTunnelResult;
+  tunnelFailure?: "cloudflared_missing" | "transport_down" | "probe_inconclusive";
   bridgeStopped: boolean;
   bridgeUnknown: boolean;
 }): DoctorResult {
@@ -138,6 +168,8 @@ export function createDoctorResult(input: {
     chatgptRepair: input.chatgptRepair,
     namedRepair: input.namedRepair,
     conversation: null,
+    endpointIdentity: input.endpointIdentity,
+    tunnel: input.tunnel,
   } as const;
 
   if (input.bridgeUnknown) {
@@ -156,6 +188,18 @@ export function createDoctorResult(input: {
       reason: "bridge_stopped",
       safeRetry: true,
       nextAction: { type: "manual_recovery", reason: "bridge_stopped" },
+    };
+  }
+  if (input.tunnelFailure) {
+    const unknown = input.tunnelFailure === "probe_inconclusive";
+    return {
+      ...base,
+      outcome: unknown ? "unknown" : "blocked",
+      reason: input.tunnelFailure,
+      safeRetry: true,
+      nextAction: unknown
+        ? { type: "retry_wait", reason: input.tunnelFailure }
+        : { type: "manual_recovery", reason: input.tunnelFailure },
     };
   }
   if (input.namedRepair.needed) {
