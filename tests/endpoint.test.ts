@@ -50,14 +50,14 @@ describe("connectorNameFor", () => {
     ).toBe(DEFAULT_CONNECTOR_NAME);
   });
 
-  it("gives a new workspace its own connector title", () => {
+  it("uses the one machine-global connector for a new workspace", () => {
     expect(
       connectorNameFor({
         workspaceName: "Landing",
         workspaceId: "def456def456",
         hadEndpointBefore: false,
       })
-    ).toBe("Codex with ChatGPT · Landing");
+    ).toBe(DEFAULT_CONNECTOR_NAME);
   });
 });
 

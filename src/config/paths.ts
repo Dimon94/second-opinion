@@ -39,6 +39,10 @@ export function stateSubdir(name: string): string {
   return ensureDir(path.join(getStateDir(), name));
 }
 
+export function legacyMigrationRevocationFile(): string {
+  return path.join(getStateDir(), "migrations", "legacy-global-v1-revoked.json");
+}
+
 /** Write a JSON file with owner-only permissions. */
 export function writeSecureJson(file: string, data: unknown): void {
   ensureDir(path.dirname(file));

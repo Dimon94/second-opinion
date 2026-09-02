@@ -44,10 +44,10 @@ again. The local process may still be running.
 ### Everything was quit and ChatGPT can no longer connect
 Quitting Codex / the terminal stops the public address. The next `c2c doctor`
 starts a new address and sets `chatgptRepair.needed`. The Skill should tell the
-user that the old address expired, then **Delete** THIS workspace's
+user that the old address expired, then **Delete** the machine-global
 connector (`chatgptRepair.connectorName`) and create it again with the new
-address (never click Reconnect — the old URL is dead). Other workspaces keep
-their own connectors so two projects can stay connected at once.
+address (never click Reconnect — the old URL is dead). Other workspaces reuse
+that connector while the bridge switches its one active canonical root.
 
 Fixed ChatGPT pages for first-time setup and later repair (do not hunt the UI):
 
@@ -57,16 +57,16 @@ Fixed ChatGPT pages for first-time setup and later repair (do not hunt the UI):
   https://chatgpt.com/plugins#settings/Connectors?create-connector=true&redirectAfter=%2Fplugins
 
 ### Tunnel URL unreachable / ChatGPT says the connector is broken
-Same as above: `c2c doctor`, then Delete + recreate THIS workspace's
+Same as above: `c2c doctor`, then Delete + recreate the machine-global
 connector if `chatgptRepair.needed`. Fresh pairing code: `c2c pair`.
-If this workspace uses a stable hostname, doctor sets `namedRepair` instead —
+If this machine uses a stable hostname, doctor sets `namedRepair` instead —
 re-login to Cloudflare (`c2c tunnel login`) and doctor again. Do not Delete
 the connector; the address did not change.
 
 ### I have a Cloudflare domain and want a stable hostname
 During first-time setup (or the next coding session, once), say you have a
 Cloudflare account and give the domain. Codex opens a browser for Cloudflare
-login, then keeps `c2c-<project>.your-domain.com`. To stay on the temporary
+login, then keeps one hostname such as `c2c-bridge.your-domain.com`. To stay on the temporary
 address, say you do not have a domain. Switching later: tell Codex you want
 the stable hostname; it runs `c2c tunnel choose --mode named --zone <domain>`.
 
@@ -81,7 +81,7 @@ generates a fresh one (older codes become invalid immediately).
 
 ### ChatGPT gets 401 on every tool call
 The access token expired and refresh failed (e.g. after `c2c unpair` or a
-long offline period). Delete THIS workspace's connector if the address also
+long offline period). Delete the machine-global connector if the address also
 changed; otherwise run Authorize again in ChatGPT and enter a fresh pairing
 code. Never use Reconnect when the public address has been replaced.
 
@@ -122,7 +122,8 @@ collection page is open (`https://chatgpt.com/g/g-p-…/project`).
 ### This workspace opened the wrong ChatGPT Project
 Do not pick another project by name automatically. Open the collection that
 matches this workspace and tell Codex「已找到」, or say you want the old
-long-chat instead. Each workspace has its own Project and its own connector.
+long-chat instead. Each workspace has its own Project; all Projects use the
+same machine-global connector name.
 
 ### Completely stuck
 ```

@@ -130,12 +130,12 @@ style until you ask to switch.
 ### Optional stable hostname
 
 The default public address is a temporary Cloudflare URL. It changes when the
-bridge restarts, and Codex repairs ChatGPT by deleting that workspace's
+bridge restarts, and Codex repairs ChatGPT by deleting the machine-global
 connector and adding it again.
 
 If you have a Cloudflare account and a domain already on Cloudflare, first-time
 setup (and the next coding session, once) will ask whether you want a stable
-hostname such as `c2c-<project>.your-domain.com`. That path opens a browser so
+hostname such as `c2c-bridge.your-domain.com`. That path opens a browser so
 you can authorize Cloudflare. After that, the ChatGPT connector keeps working
 across restarts. If you skip it, or the login fails, Codex stays on the temporary
 address — same features, just a slower repair.

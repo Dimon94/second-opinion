@@ -6,7 +6,7 @@ import { observeProcess } from "../process/liveness.js";
 
 const RECOVERY_LEASE_TTL_MS = 5 * 60 * 1000;
 
-export type RecoveryPhase = "starting" | "sandbox" | "bridge" | "tunnel";
+export type RecoveryPhase = "starting" | "migration" | "sandbox" | "bridge" | "tunnel";
 
 export interface RecoveryLeaseOwner {
   version: 1;
@@ -54,7 +54,7 @@ function isLeaseRecord(value: RecoveryLeaseRecord | null): value is RecoveryLeas
       Number.isFinite(Date.parse(value.expiresAt)) &&
       value.workspaceId &&
       value.workspaceRoot &&
-      ["starting", "sandbox", "bridge", "tunnel"].includes(value.phase)
+      ["starting", "migration", "sandbox", "bridge", "tunnel"].includes(value.phase)
   );
 }
 

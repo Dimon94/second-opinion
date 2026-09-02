@@ -238,8 +238,8 @@ Rules:
 12. If you receive a HANDOFF message, this conversation continues an
     existing task. Trust the handoff brief for history, re-read any code
     you need through MCP, and resume from NEXT_EXPECTED_STEP.
-13. If this chat sits in a ChatGPT Project, use only the connector named
-    in that Project's instructions. Do not use another workspace's connector.
+13. If this chat sits in a ChatGPT Project, use only the machine-global
+    connector named in that Project's instructions.
 ```
 
 ## Project instructions

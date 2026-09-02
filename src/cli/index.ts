@@ -26,6 +26,12 @@ import {
 } from "../tunnel/state.js";
 import { Logger } from "../logger/index.js";
 import { getStateDir } from "../config/paths.js";
+import {
+  acknowledgeLegacyRuntimeReload,
+  hasLegacyStateToMigrate,
+  migrateLegacyState,
+  type LegacyMigrationResult,
+} from "../config/legacy-migration.js";
 import { ensureSandboxAllowlist, getCodexConfigPath, isStateDirAllowlisted } from "../config/sandbox-allow.js";
 import { mergeUiPrefs, readUiPrefs, SETUP_MODES, type SetupMode } from "../config/ui-prefs.js";
 import {
@@ -434,6 +440,7 @@ program
     const report: Record<string, DoctorCheck> = {};
     const results: string[] = [];
     let recoveryLease: RecoveryLeaseHandle | null = null;
+    let migration: LegacyMigrationResult | null = null;
 
     if (shouldFix) {
       let requested: Workspace | null = null;
@@ -472,6 +479,21 @@ program
     }
 
     try {
+
+    if (shouldFix && recoveryLease) {
+      recoveryLease.updatePhase("migration");
+      const bridgeBeforeMigration = hasLegacyStateToMigrate()
+        ? await findBridgeObservation()
+        : null;
+      if (bridgeBeforeMigration?.state !== "unknown") {
+        migration = migrateLegacyState();
+        if (migration.status !== "not_needed" && bridgeBeforeMigration?.state === "healthy") {
+          await adminFetch(bridgeBeforeMigration.runtime, "POST", "/admin/auth/reload");
+        }
+        if (migration.status !== "not_needed") acknowledgeLegacyRuntimeReload();
+        if (migration.status === "migrated") results.push("已保守迁移旧连接状态");
+      }
+    }
 
     // Node
     const nodeMajor = parseInt(process.versions.node.split(".")[0], 10);
@@ -751,6 +773,20 @@ program
         };
       }
     }
+    if (
+      migration?.status === "consent_required" &&
+      !chatgptRepair.needed &&
+      !namedRepair.needed &&
+      !tunnelFailure
+    ) {
+      authorization = {
+        state: "missing",
+        clientId: null,
+        proof: null,
+        recoverable: false,
+      };
+      report.oauth = { ok: false, detail: `legacy_migration:${migration.reason}` };
+    }
 
     const labels: Record<string, string> = {
       node: "Node.js",
@@ -769,12 +805,18 @@ program
       endpointIdentity,
       tunnel: tunnelResult,
       authorization,
+      migration,
       authorizationPage: CHATGPT_PLUGINS_URL,
       tunnelFailure,
       bridgeStopped,
       bridgeUnknown,
       conversation: workspace
-        ? { workspaceId: workspace.id, ...resolveConversation(readSession(workspace.id)) }
+        ? {
+            workspaceId: workspace.id,
+            ...resolveConversation(
+              migration?.status === "consent_required" ? null : readSession(workspace.id)
+            ),
+          }
         : null,
     }), browserGate, opts.browserPage);
     process.exitCode = DOCTOR_EXIT_STATUS[result.outcome];
@@ -995,7 +1037,7 @@ session
   .option("--state <state>", "last protocol state, e.g. EXECUTED")
   .option("--mode <mode>", "long-chat or project")
   .option("--project-url <url>", "ChatGPT Project collection URL (…/g/g-p-…/project)")
-  .option("--connector-name <name>", "exact connector title for this workspace")
+  .option("--connector-name <name>", "exact machine-global connector title")
   .option("--protocol-state <state>", "checkpoint protocol state, e.g. EXECUTED_SENT")
   .option("--waiting-for <who>", "none | GPT_PLAN | GPT_REVIEW | USER")
   .option("--goal <text>", "original task goal for resume / HANDOFF")
@@ -1197,11 +1239,11 @@ program
     }
   );
 
-const tunnelCmd = program.command("tunnel").description("Choose or inspect the public connection for this workspace");
+const tunnelCmd = program.command("tunnel").description("Choose or inspect the machine-global public connection");
 
 tunnelCmd
   .command("status", { isDefault: true })
-  .description("Show whether this workspace still needs a one-time connection choice")
+  .description("Show whether this machine still needs a one-time connection choice")
   .option("-w, --workspace <path>")
   .option("--zone <domain>", "optional domain, used to preview the stable hostname")
   .option("--json", "machine-readable output", false)
@@ -1227,7 +1269,7 @@ tunnelCmd
   .requiredOption("--mode <mode>", "quick or named")
   .option("-w, --workspace <path>")
   .option("--zone <domain>", "Cloudflare domain for a named hostname")
-  .option("--hostname <hostname>", "override the default c2c-<project>.<zone>")
+  .option("--hostname <hostname>", "override the suggested c2c hostname")
   .option("--json", "machine-readable output", false)
   .action(async (opts: { mode: string; workspace?: string; zone?: string; hostname?: string; json: boolean }) => {
     const root = resolveWorkspace(opts.workspace);

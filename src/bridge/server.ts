@@ -176,15 +176,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
         return;
       }
       try {
-        const nextTunnel = opts.tunnelProvider
-          ? null
-          : configuredTunnelForWorkspace(nextWorkspace.id, logger);
-        if (nextTunnel) {
-          await tunnel.stop();
-          publicBaseUrl = null;
-        }
         persistRuntime(nextWorkspace);
-        if (nextTunnel) tunnel = nextTunnel;
         workspace = nextWorkspace;
         logger.info(`Activated workspace ${workspace.name} (${workspace.id})`);
         res.json({
@@ -266,6 +258,11 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     pairing.invalidateAll();
     logger.info(`Revoked all tokens (${count})`);
     res.json({ revoked: count });
+  });
+
+  app.post("/admin/auth/reload", adminGuard, (_req, res) => {
+    authStore.reload();
+    res.json({ reloaded: true });
   });
 
   app.post("/admin/shutdown", adminGuard, (_req, res) => {

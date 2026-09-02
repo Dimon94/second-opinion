@@ -1,5 +1,6 @@
 import type { ConversationView } from "../session/state.js";
 import type { AuthorizationStatus } from "../auth/store.js";
+import type { LegacyMigrationResult } from "../config/legacy-migration.js";
 
 export const DOCTOR_CONTRACT_VERSION = 1 as const;
 
@@ -123,6 +124,7 @@ export interface DoctorResult {
   endpointIdentity: DoctorEndpointIdentity;
   tunnel: DoctorTunnelResult;
   authorization: DoctorAuthorizationResult;
+  migration: LegacyMigrationResult | null;
   /** Kept for existing doctor JSON consumers while they move to the versioned fields. */
   report: Record<string, DoctorCheck>;
   chatgptRepair: DoctorChatgptRepair;
@@ -173,6 +175,7 @@ export function createRecoveryLeaseDoctorResult(
       proof: null,
       recoverable: false,
     },
+    migration: null,
     report: { recoveryLease: { ok: false, detail } },
     chatgptRepair: {
       needed: false,
@@ -195,6 +198,7 @@ export function createDoctorResult(input: {
   endpointIdentity: DoctorEndpointIdentity;
   tunnel: DoctorTunnelResult;
   authorization: DoctorAuthorizationResult;
+  migration: LegacyMigrationResult | null;
   authorizationPage: string;
   tunnelFailure?: "cloudflared_missing" | "transport_down" | "probe_inconclusive";
   bridgeStopped: boolean;
@@ -210,6 +214,7 @@ export function createDoctorResult(input: {
     endpointIdentity: input.endpointIdentity,
     tunnel: input.tunnel,
     authorization: input.authorization,
+    migration: input.migration,
   } as const;
 
   if (input.bridgeUnknown) {

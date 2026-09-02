@@ -55,7 +55,7 @@ probe stays unknown and never creates a pairing session or masquerades as revoca
 State lives under the OS-convention app dir
 (`~/Library/Application Support/codex-with-chatgpt` on macOS), directories 0700,
 files 0600. Named-hostname preference and tunnel metadata live there too
-(`tunnels/<workspaceId>.json`) — never in the project. Only SHA-256 hashes plus
+(`tunnels/global.json`) — never in the project. Only SHA-256 hashes plus
 canonical binding metadata, expiry, the last successful grant-proof kind, and
 an explicit revocation marker are persisted in the owner-only global auth store
 — a stolen state file does not yield usable bearer tokens. Raw access and

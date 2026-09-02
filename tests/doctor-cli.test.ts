@@ -230,6 +230,39 @@ describe("c2c doctor contract", () => {
     else process.env.TUNNEL_ORIGIN_CERT = previousOriginCert;
   });
 
+  it("requires explicit global OAuth consent for ambiguous legacy identity", async () => {
+    const fixture = isolatedWorkspace("doctor-legacy-ambiguous");
+    dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+    process.env.C2C_STATE_DIR = fixture.stateDir;
+    const workspace = new Workspace(fixture.workspace);
+    writeSecureJson(path.join(fixture.stateDir, "auth", `${workspace.id}.json`), {
+      clients: [{ clientId: "legacy-client", redirectUris: [], createdAt: "2026-01-01" }],
+      tokens: [],
+    });
+    const bridge = await startBridge({
+      workspaceRoot: fixture.workspace,
+      port: 0,
+      persistRuntime: true,
+    });
+    bridges.push(bridge);
+
+    const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
+
+    expect(result.status).toBe(2);
+    expect(parseResult(result.stdout)).toMatchObject({
+      outcome: "user_action_required",
+      reason: "auth_required",
+      migration: {
+        version: 1,
+        status: "consent_required",
+        reason: "identity_incomplete",
+      },
+      nextAction: { type: "authorize_oauth", reason: "auth_required" },
+    });
+    expect(bridge.pairing.hasActiveSession()).toBe(false);
+    expect(fs.existsSync(path.join(fixture.stateDir, "auth", "store.json"))).toBe(false);
+  });
+
   it("resolves owner state with native macOS and Windows path semantics", () => {
     expect(getDefaultStateDir("darwin", "/Users/alice", {})).toBe(
       "/Users/alice/Library/Application Support/codex-with-chatgpt"
@@ -849,7 +882,7 @@ describe("c2c doctor contract", () => {
     expect(readRuntimeState(requested.id)).toEqual(active);
   });
 
-  it("rebinds a stopped tunnel provider when the requested workspace has a named tunnel", async () => {
+  it("keeps the machine-global named tunnel while switching workspaces", async () => {
     const fixture = isolatedWorkspace("doctor-switch-named");
     const requestedRoot = makeTmpDir("doctor-switch-named-target");
     write(requestedRoot, "README.md", "named target\n");
@@ -866,7 +899,7 @@ describe("c2c doctor contract", () => {
     });
     const bridge = await startBridge({ workspaceRoot: fixture.workspace, port: 0, persistRuntime: true });
     bridges.push(bridge);
-    expect(bridge.tunnel.name).toBe("cloudflare-quick");
+    expect(bridge.tunnel.name).toBe("cloudflare-named");
     const runtime = readRuntimeState();
 
     await adminFetch(runtime!, "POST", "/admin/workspace", 60_000, {
@@ -904,7 +937,7 @@ describe("c2c doctor contract", () => {
       expiresAt: expect.any(String),
       workspaceId: new Workspace(firstRoot).id,
       workspaceRoot: new Workspace(firstRoot).root,
-      phase: expect.stringMatching(/^(starting|sandbox|bridge|tunnel)$/),
+      phase: expect.stringMatching(/^(starting|migration|sandbox|bridge|tunnel)$/),
     });
     if (process.platform !== "win32") {
       expect(fs.statSync(recoveryLeasePath(stateDir)).mode & 0o777).toBe(0o700);

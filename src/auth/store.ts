@@ -1,6 +1,13 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
-import { ensureDir, getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
+import {
+  ensureDir,
+  getStateDir,
+  legacyMigrationRevocationFile,
+  readJsonIfExists,
+  writeSecureJson,
+} from "../config/paths.js";
 
 export const SUPPORTED_SCOPES = [
   "workspace.read",
@@ -192,6 +199,7 @@ export class AuthStore {
   private tokens = new Map<string, TokenRecord>();
   private authCodes = new Map<string, AuthorizationCodeRecord>();
   private readonly file: string;
+  private migrationPending = false;
   bridgeId = `c2c_bridge_${randomBytes(16).toString("base64url")}`;
 
   constructor(opts: { file?: string } = {}) {
@@ -200,17 +208,40 @@ export class AuthStore {
     this.load();
   }
 
+  reload(): void {
+    this.clients.clear();
+    this.tokens.clear();
+    this.authCodes.clear();
+    this.migrationPending = false;
+    this.bridgeId = `c2c_bridge_${randomBytes(16).toString("base64url")}`;
+    this.load();
+  }
+
   private load(): void {
+    const migration = readJsonIfExists<{ version: number; status: string }>(
+      path.join(getStateDir(), "migrations", "legacy-global-v1.json")
+    );
+    if (migration?.version === 1 && migration.status === "pending") {
+      this.migrationPending = true;
+      return;
+    }
     const data = readJsonIfExists<PersistedAuthState>(this.file);
     if (!data || data.version !== 2 || typeof data.bridgeId !== "string") return;
+    const migrationRevoked = fs.existsSync(legacyMigrationRevocationFile());
     this.bridgeId = data.bridgeId;
-    for (const client of data.clients ?? []) this.clients.set(client.clientId, client);
+    for (const client of data.clients ?? []) {
+      if (migrationRevoked && client.grant) {
+        client.grant = { ...client.grant, state: "revoked" };
+      }
+      this.clients.set(client.clientId, client);
+    }
     for (const token of data.tokens ?? []) {
-      if (!token.revoked) this.tokens.set(token.hash, token);
+      if (!migrationRevoked && !token.revoked) this.tokens.set(token.hash, token);
     }
   }
 
   private save(): void {
+    if (this.migrationPending) throw new Error("legacy state migration is incomplete");
     const now = Date.now();
     const state: PersistedAuthState = {
       version: 2,
@@ -367,6 +398,13 @@ export class AuthStore {
       };
     }
     this.save();
+    fs.rmSync(legacyMigrationRevocationFile(), { force: true });
+    writeSecureJson(path.join(getStateDir(), "migrations", "legacy-global-v1.json"), {
+      version: 1,
+      status: "completed",
+      runtimeReloadPending: false,
+      result: { version: 1, status: "not_needed", reason: "canonical_state_exists" },
+    });
     return {
       accessToken,
       refreshToken,
@@ -436,8 +474,16 @@ export class AuthStore {
   }
 
   revokeToken(token: string): boolean {
+    if (this.migrationPending) {
+      this.revokeAll();
+      return true;
+    }
     const record = this.tokens.get(sha256hex(token));
     if (!record) return false;
+    writeSecureJson(legacyMigrationRevocationFile(), {
+      version: 1,
+      revokedAt: new Date().toISOString(),
+    });
     const clientId = record.binding.clientId;
     const client = this.clients.get(clientId);
     const grant = client ? this.grantFor(client) : null;
@@ -453,6 +499,10 @@ export class AuthStore {
 
   /** Used by `c2c unpair`: revoke the machine-global Connector grant. */
   revokeAll(): number {
+    writeSecureJson(legacyMigrationRevocationFile(), {
+      version: 1,
+      revokedAt: new Date().toISOString(),
+    });
     const count = this.tokens.size;
     const grants = [...this.clients.values()].map(
       (client) => [client, this.grantFor(client)] as const
@@ -461,6 +511,17 @@ export class AuthStore {
     this.authCodes.clear();
     for (const [client, grant] of grants) {
       if (grant) client.grant = { ...grant, state: "revoked" };
+    }
+    if (this.migrationPending) {
+      this.migrationPending = false;
+      this.save();
+      writeSecureJson(path.join(getStateDir(), "migrations", "legacy-global-v1.json"), {
+        version: 1,
+        status: "completed",
+        runtimeReloadPending: false,
+        result: { version: 1, status: "consent_required", reason: "revoked" },
+      });
+      return count;
     }
     this.save();
     return count;
