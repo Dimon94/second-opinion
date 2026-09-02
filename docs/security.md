@@ -43,6 +43,12 @@ and machine-global Bridge identity. Any mismatch fails closed with a specific
 reason. Local admin activation changes only the canonical data root: the global
 grant follows the workspace currently selected by local Codex and remote OAuth
 or MCP requests cannot choose that workspace or broaden its read-only scopes.
+Doctor reuses a grant only when that exact binding still matches and the store
+has a successful protected-resource or refresh result. Authorization-code-only
+state and access expiry remain unverified until a real protected call or refresh;
+they request a safe retry, not a new pairing, while the rotating refresh grant
+remains valid. Explicit token revocation revokes the client grant. An unreachable
+probe stays unknown and never creates a pairing session or masquerades as revocation.
 
 ## Storage
 
@@ -50,9 +56,10 @@ State lives under the OS-convention app dir
 (`~/Library/Application Support/codex-with-chatgpt` on macOS), directories 0700,
 files 0600. Named-hostname preference and tunnel metadata live there too
 (`tunnels/<workspaceId>.json`) — never in the project. Only SHA-256 hashes plus
-canonical binding metadata and its stable fingerprint are persisted in the
-owner-only global auth store — a stolen state file does not yield usable bearer
-tokens. Raw access and refresh tokens are never written.
+canonical binding metadata, expiry, the last successful grant-proof kind, and
+an explicit revocation marker are persisted in the owner-only global auth store
+— a stolen state file does not yield usable bearer tokens. Raw access and
+refresh tokens are never written.
 Recovery lease and reclaimed-stale evidence also stay in this owner-only state
 directory; neither is written to a workspace repository.
 

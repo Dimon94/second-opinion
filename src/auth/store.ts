@@ -87,6 +87,38 @@ export interface ClientRegistration {
   createdAt: string;
   binding: CanonicalOAuthIdentity;
   grantedScopes?: string[];
+  grant?: PersistedGrant;
+}
+
+export type AuthorizationProof = "authorization_code" | "protected_resource" | "refresh";
+
+export type AuthorizationStatus =
+  | {
+      state: "healthy" | "expired" | "unverified";
+      clientId: string;
+      proof: AuthorizationProof;
+      recoverable: boolean;
+    }
+  | {
+      state: "revoked" | "invalid_client" | "identity_mismatch";
+      clientId: string | null;
+      proof: AuthorizationProof | null;
+      recoverable: false;
+      reason?: OAuthIdentityMismatchReason;
+    }
+  | {
+      state: "missing";
+      clientId: null;
+      proof: null;
+      recoverable: false;
+    };
+
+interface PersistedGrant {
+  binding: CanonicalOAuthIdentity;
+  state: "active" | "revoked";
+  proof: AuthorizationProof;
+  accessExpiresAt: number;
+  refreshExpiresAt: number | null;
 }
 
 export function clientRegistrationFingerprint(
@@ -172,10 +204,9 @@ export class AuthStore {
     const data = readJsonIfExists<PersistedAuthState>(this.file);
     if (!data || data.version !== 2 || typeof data.bridgeId !== "string") return;
     this.bridgeId = data.bridgeId;
-    const now = Date.now();
     for (const client of data.clients ?? []) this.clients.set(client.clientId, client);
     for (const token of data.tokens ?? []) {
-      if (!token.revoked && token.expiresAt > now) this.tokens.set(token.hash, token);
+      if (!token.revoked) this.tokens.set(token.hash, token);
     }
   }
 
@@ -188,6 +219,29 @@ export class AuthStore {
       tokens: [...this.tokens.values()].filter((t) => !t.revoked && t.expiresAt > now),
     };
     writeSecureJson(this.file, state);
+  }
+
+  private grantFor(client: ClientRegistration): PersistedGrant | null {
+    if (client.grant) return client.grant;
+    const records = [...this.tokens.values()].filter(
+      (token) => token.binding.clientId === client.clientId
+    );
+    if (records.length === 0) return null;
+    const binding = records[0].binding;
+    return {
+      binding,
+      state: "active",
+      proof: "authorization_code",
+      accessExpiresAt: Math.max(
+        0,
+        ...records.filter((token) => token.kind === "access").map((token) => token.expiresAt)
+      ),
+      refreshExpiresAt:
+        Math.max(
+          0,
+          ...records.filter((token) => token.kind === "refresh").map((token) => token.expiresAt)
+        ) || null,
+    };
   }
 
   // ---- Dynamic Client Registration -------------------------------------
@@ -270,16 +324,16 @@ export class AuthStore {
   issueTokens(input: {
     identity: CanonicalOAuthIdentity;
     accessTtlMs?: number;
+    proof?: AuthorizationProof;
   }): { accessToken: string; refreshToken: string | null; expiresIn: number; scopes: string[] } {
     const now = Date.now();
     const accessTtl = input.accessTtlMs ?? ACCESS_TOKEN_TTL_MS;
     const client = this.clients.get(input.identity.clientId);
-    if (
-      client &&
-      clientRegistrationFingerprint(client) === input.identity.clientRegistration
-    ) {
-      client.grantedScopes = [...input.identity.scopes];
-    }
+    const currentClient =
+      client && clientRegistrationFingerprint(client) === input.identity.clientRegistration
+        ? client
+        : null;
+    if (currentClient) currentClient.grantedScopes = [...input.identity.scopes];
 
     const accessToken = newToken("c2c_at");
     this.tokens.set(sha256hex(accessToken), {
@@ -302,6 +356,15 @@ export class AuthStore {
         expiresAt: now + REFRESH_TOKEN_TTL_MS,
         revoked: false,
       });
+    }
+    if (currentClient) {
+      currentClient.grant = {
+        binding: input.identity,
+        state: "active",
+        proof: input.proof ?? "authorization_code",
+        accessExpiresAt: now + accessTtl,
+        refreshExpiresAt: refreshToken ? now + REFRESH_TOKEN_TTL_MS : null,
+      };
     }
     this.save();
     return {
@@ -329,6 +392,12 @@ export class AuthStore {
     if (!expectedIdentity) return { ok: false, reason: "client_mismatch" };
     const mismatch = compareOAuthIdentity(expectedIdentity, record.binding);
     if (mismatch) return { ok: false, reason: mismatch };
+    const client = this.clients.get(record.binding.clientId);
+    const grant = client ? this.grantFor(client) : null;
+    if (client && grant && grant.proof !== "protected_resource") {
+      client.grant = { ...grant, proof: "protected_resource" };
+      this.save();
+    }
     return { ok: true, record };
   }
 
@@ -361,6 +430,7 @@ export class AuthStore {
     this.tokens.delete(record.hash);
     const tokens = this.issueTokens({
       identity: record.binding,
+      proof: "refresh",
     });
     return { ok: true, tokens };
   }
@@ -368,8 +438,15 @@ export class AuthStore {
   revokeToken(token: string): boolean {
     const record = this.tokens.get(sha256hex(token));
     if (!record) return false;
-    record.revoked = true;
-    this.tokens.delete(record.hash);
+    const clientId = record.binding.clientId;
+    const client = this.clients.get(clientId);
+    const grant = client ? this.grantFor(client) : null;
+    for (const [hash, candidate] of this.tokens) {
+      if (candidate.binding.clientId === clientId) this.tokens.delete(hash);
+    }
+    if (client && grant) {
+      client.grant = { ...grant, state: "revoked" };
+    }
     this.save();
     return true;
   }
@@ -377,10 +454,93 @@ export class AuthStore {
   /** Used by `c2c unpair`: revoke the machine-global Connector grant. */
   revokeAll(): number {
     const count = this.tokens.size;
+    const grants = [...this.clients.values()].map(
+      (client) => [client, this.grantFor(client)] as const
+    );
     this.tokens.clear();
     this.authCodes.clear();
+    for (const [client, grant] of grants) {
+      if (grant) client.grant = { ...grant, state: "revoked" };
+    }
     this.save();
     return count;
+  }
+
+  authorizationStatus(baseUrl: string): AuthorizationStatus {
+    const clients = [...this.clients.values()]
+      .filter((client) => this.grantFor(client))
+      .reverse();
+    const client = clients[0];
+    const grant = client ? this.grantFor(client) : null;
+    if (!client || !grant) {
+      return this.tokens.size > 0
+        ? {
+            state: "invalid_client",
+            clientId: null,
+            proof: null,
+            recoverable: false,
+          }
+        : {
+            state: "missing",
+            clientId: null,
+            proof: null,
+            recoverable: false,
+          };
+    }
+    if (grant.state === "revoked") {
+      return {
+        state: "revoked",
+        clientId: client.clientId,
+        proof: grant.proof,
+        recoverable: false,
+      };
+    }
+    const expected = this.identityForClient(
+      baseUrl,
+      client.clientId,
+      client.grantedScopes ?? grant.binding.scopes
+    );
+    if (!expected) {
+      return {
+        state: "invalid_client",
+        clientId: client.clientId,
+        proof: grant.proof,
+        recoverable: false,
+      };
+    }
+    const mismatch = compareOAuthIdentity(expected, grant.binding);
+    if (mismatch) {
+      return {
+        state: mismatch === "client_mismatch" ? "invalid_client" : "identity_mismatch",
+        clientId: client.clientId,
+        proof: grant.proof,
+        recoverable: false,
+        reason: mismatch,
+      };
+    }
+    const now = Date.now();
+    if (grant.refreshExpiresAt !== null && grant.refreshExpiresAt <= now) {
+      return {
+        state: "expired",
+        clientId: client.clientId,
+        proof: grant.proof,
+        recoverable: false,
+      };
+    }
+    if (grant.accessExpiresAt > now) {
+      return {
+        state: grant.proof === "authorization_code" ? "unverified" : "healthy",
+        clientId: client.clientId,
+        proof: grant.proof,
+        recoverable: true,
+      };
+    }
+    return {
+      state: "expired",
+      clientId: client.clientId,
+      proof: grant.proof,
+      recoverable: grant.refreshExpiresAt !== null && grant.refreshExpiresAt > now,
+    };
   }
 
   tokenCount(): number {

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import { startBridge, type Bridge } from "../src/bridge/server.js";
@@ -109,13 +109,140 @@ describe("canonical OAuth identity", () => {
       expect(persisted).toContain(identity.fingerprint);
       if (process.platform !== "win32") expect(fs.statSync(file).mode & 0o777).toBe(0o600);
 
+      const previousShape = JSON.parse(fs.readFileSync(file, "utf8")) as {
+        clients: Array<{ grant?: unknown }>;
+      };
+      delete previousShape.clients[0].grant;
+      fs.writeFileSync(file, JSON.stringify(previousShape));
+      const beforeStatus = fs.readFileSync(file, "utf8");
       const reloaded = new AuthStore({ file });
       expect(reloaded.bridgeId).toBe(store.bridgeId);
+      expect(reloaded.authorizationStatus("https://bridge.example")).toMatchObject({
+        state: "unverified",
+        proof: "authorization_code",
+        recoverable: true,
+      });
+      expect(fs.readFileSync(file, "utf8")).toBe(beforeStatus);
       expect(reloaded.verifyAccessToken(tokens.accessToken, identity)).toMatchObject({ ok: true });
+      expect(reloaded.authorizationStatus("https://bridge.example")).toMatchObject({
+        state: "healthy",
+        proof: "protected_resource",
+      });
+      const refreshed = reloaded.refresh(tokens.refreshToken!, {
+        baseUrl: "https://bridge.example",
+        clientId: client.clientId,
+      });
+      expect(refreshed.ok).toBe(true);
+      expect(reloaded.authorizationStatus("https://bridge.example")).toMatchObject({
+        state: "healthy",
+        proof: "refresh",
+      });
+      expect(
+        reloaded.refresh(tokens.refreshToken!, {
+          baseUrl: "https://bridge.example",
+          clientId: client.clientId,
+        })
+      ).toEqual({ ok: false, reason: "invalid_grant" });
     } finally {
       cleanup(dir);
     }
   });
+});
+
+describe("persisted grant lifecycle", () => {
+  it("distinguishes access expiry from refresh expiry and records a real refresh", () => {
+    const dir = makeTmpDir("oauth-grant-expiry");
+    const now = new Date("2026-01-01T00:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      const store = new AuthStore({ file: path.join(dir, "store.json") });
+      const client = store.registerClient({
+        baseUrl: "https://bridge.example",
+        redirectUris: [REDIRECT_URI],
+      });
+      const issued = store.issueTokens({
+        identity: store.identityForClient(
+          "https://bridge.example",
+          client.clientId,
+          ["workspace.read", "offline_access"]
+        )!,
+        accessTtlMs: 60_000,
+      });
+
+      vi.setSystemTime(new Date(now.getTime() + 60_001));
+      expect(store.authorizationStatus("https://bridge.example")).toMatchObject({
+        state: "expired",
+        recoverable: true,
+        proof: "authorization_code",
+      });
+      const refreshed = store.refresh(issued.refreshToken!, {
+        baseUrl: "https://bridge.example",
+        clientId: client.clientId,
+      });
+      expect(refreshed.ok).toBe(true);
+      expect(store.authorizationStatus("https://bridge.example")).toMatchObject({
+        state: "healthy",
+        recoverable: true,
+        proof: "refresh",
+      });
+      expect(
+        store.refresh(issued.refreshToken!, {
+          baseUrl: "https://bridge.example",
+          clientId: client.clientId,
+        })
+      ).toEqual({ ok: false, reason: "invalid_grant" });
+
+      vi.setSystemTime(new Date(now.getTime() + 31 * 24 * 60 * 60 * 1000));
+      expect(store.authorizationStatus("https://bridge.example")).toMatchObject({
+        state: "expired",
+        recoverable: false,
+      });
+    } finally {
+      vi.useRealTimers();
+      cleanup(dir);
+    }
+  });
+
+  it.each(["revoked", "expired"] as const)(
+    "retains %s evidence from the previous persisted store shape",
+    (terminal) => {
+      const dir = makeTmpDir(`oauth-previous-${terminal}`);
+      const file = path.join(dir, "store.json");
+      try {
+        const store = new AuthStore({ file });
+        const client = store.registerClient({
+          baseUrl: "https://bridge.example",
+          redirectUris: [REDIRECT_URI],
+        });
+        store.issueTokens({
+          identity: store.identityForClient(
+            "https://bridge.example",
+            client.clientId,
+            ["workspace.read", "offline_access"]
+          )!,
+        });
+        const previousShape = JSON.parse(fs.readFileSync(file, "utf8")) as {
+          clients: Array<{ grant?: unknown }>;
+          tokens: Array<{ expiresAt: number }>;
+        };
+        delete previousShape.clients[0].grant;
+        if (terminal === "expired") {
+          for (const token of previousShape.tokens) token.expiresAt = 0;
+        }
+        fs.writeFileSync(file, JSON.stringify(previousShape));
+
+        const reloaded = new AuthStore({ file });
+        if (terminal === "revoked") reloaded.revokeAll();
+        expect(new AuthStore({ file }).authorizationStatus("https://bridge.example")).toMatchObject({
+          state: terminal,
+          recoverable: false,
+        });
+      } finally {
+        cleanup(dir);
+      }
+    }
+  );
 });
 
 beforeAll(async () => {
@@ -270,6 +397,7 @@ describe("authorization + token flow", () => {
     expect(token.body.access_token).toMatch(/^c2c_at_/);
     expect(token.body.refresh_token).toMatch(/^c2c_rt_/);
     expect(token.body.token_type).toBe("Bearer");
+    expect(token.body.expires_in).toBe(3600);
 
     // authorized MCP request
     const mcpResponse = await fetch(`${base}/mcp`, {
@@ -594,6 +722,41 @@ describe("refresh token rotation", () => {
     });
     expect(response.status).toBe(400);
     expect(await response.json()).toMatchObject({ error_description: "scope_mismatch" });
+  });
+
+  it("revokes the whole persisted grant through the RFC revocation endpoint", async () => {
+    const clientId = await registerClient();
+    const { verifier, challenge } = pkceVerifierAndChallenge();
+    const pairing = bridge.pairing.create();
+    const { code } = await authorizeWithPairing(clientId, challenge, pairing.code);
+    const initial = await exchangeToken(clientId, code!, verifier);
+
+    const revoked = await fetch(`${base}/oauth/revoke`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ token: initial.body.refresh_token }),
+    });
+    expect(revoked.status).toBe(200);
+    expect((await fetch(`${base}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        authorization: `Bearer ${initial.body.access_token}`,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+    })).status).toBe(401);
+    const refresh = await fetch(`${base}/oauth/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: initial.body.refresh_token,
+        client_id: clientId,
+        resource: `${base}/mcp`,
+      }),
+    });
+    expect(refresh.status).toBe(400);
   });
 
   it("rejects an old broad refresh token after the current grant is narrowed", () => {

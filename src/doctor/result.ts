@@ -1,4 +1,5 @@
 import type { ConversationView } from "../session/state.js";
+import type { AuthorizationStatus } from "../auth/store.js";
 
 export const DOCTOR_CONTRACT_VERSION = 1 as const;
 
@@ -82,6 +83,31 @@ export interface DoctorTunnelResult {
   publicHealth: "passed" | "failed" | "unknown" | "not_checked";
 }
 
+export type DoctorAuthorizationResult =
+  | AuthorizationStatus
+  | {
+      state: "not_configured" | "unreachable";
+      clientId: null;
+      proof: null;
+      recoverable: false;
+    };
+
+export function authorizationDisposition(
+  authorization: DoctorAuthorizationResult
+): "usable" | "retry" | "authorize" {
+  if (authorization.state === "healthy" || authorization.state === "not_configured") {
+    return "usable";
+  }
+  if (
+    authorization.state === "unreachable" ||
+    authorization.state === "unverified" ||
+    (authorization.state === "expired" && authorization.recoverable)
+  ) {
+    return "retry";
+  }
+  return "authorize";
+}
+
 export interface DoctorResult {
   version: typeof DOCTOR_CONTRACT_VERSION;
   outcome: DoctorOutcome;
@@ -92,6 +118,7 @@ export interface DoctorResult {
   conversation: DoctorConversationDisposition | null;
   endpointIdentity: DoctorEndpointIdentity;
   tunnel: DoctorTunnelResult;
+  authorization: DoctorAuthorizationResult;
   /** Kept for existing doctor JSON consumers while they move to the versioned fields. */
   report: Record<string, DoctorCheck>;
   chatgptRepair: DoctorChatgptRepair;
@@ -136,6 +163,12 @@ export function createRecoveryLeaseDoctorResult(
       cloudflareLogin: "not_checked",
       publicHealth: "not_checked",
     },
+    authorization: {
+      state: "unreachable",
+      clientId: null,
+      proof: null,
+      recoverable: false,
+    },
     report: { recoveryLease: { ok: false, detail } },
     chatgptRepair: {
       needed: false,
@@ -157,6 +190,9 @@ export function createDoctorResult(input: {
   conversation: DoctorConversationDisposition | null;
   endpointIdentity: DoctorEndpointIdentity;
   tunnel: DoctorTunnelResult;
+  authorization: DoctorAuthorizationResult;
+  authorizationPage: string;
+  pairingExpiresAt?: number;
   tunnelFailure?: "cloudflared_missing" | "transport_down" | "probe_inconclusive";
   bridgeStopped: boolean;
   bridgeUnknown: boolean;
@@ -170,6 +206,7 @@ export function createDoctorResult(input: {
     conversation: null,
     endpointIdentity: input.endpointIdentity,
     tunnel: input.tunnel,
+    authorization: input.authorization,
   } as const;
 
   if (input.bridgeUnknown) {
@@ -223,6 +260,31 @@ export function createDoctorResult(input: {
         page: input.chatgptRepair.pages.createConnector,
         connectorName: input.chatgptRepair.connectorName,
         endpoint: input.chatgptRepair.mcpUrl,
+      },
+    };
+  }
+  const authorization = authorizationDisposition(input.authorization);
+  if (authorization === "retry") {
+    return {
+      ...base,
+      outcome: "unknown",
+      reason: "probe_inconclusive",
+      safeRetry: true,
+      nextAction: { type: "retry_wait", reason: "probe_inconclusive" },
+    };
+  }
+  if (authorization === "authorize") {
+    const reason = input.authorization.state === "invalid_client" ? "invalid_client" : "auth_required";
+    return {
+      ...base,
+      outcome: "user_action_required",
+      reason,
+      safeRetry: false,
+      nextAction: {
+        type: "authorize_oauth",
+        reason,
+        page: input.authorizationPage,
+        pairingExpiresAt: input.pairingExpiresAt,
       },
     };
   }

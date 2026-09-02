@@ -7,7 +7,7 @@ import { startBridge } from "../bridge/server.js";
 import { findBridgeObservation, findLiveBridge, type RuntimeState } from "../bridge/runtime.js";
 import { adminFetch, ensureBridge, stopBridge } from "../process/daemon.js";
 import { Workspace } from "../workspace/manager.js";
-import { AuthStore } from "../auth/store.js";
+import { AuthStore, type AuthorizationStatus } from "../auth/store.js";
 import { detectTunnelBinaries } from "../tunnel/detect.js";
 import {
   chooseQuickTunnel,
@@ -62,10 +62,12 @@ import { sanitizeDiagnosticText, sanitizeDiagnosticValue } from "../execution/sa
 import {
   createDoctorResult,
   createRecoveryLeaseDoctorResult,
+  authorizationDisposition,
   DOCTOR_EXIT_STATUS,
   renderDoctorResult,
   type DoctorChatgptRepair,
   type DoctorCheck,
+  type DoctorAuthorizationResult,
   type DoctorNamedRepair,
   type DoctorTunnelResult,
 } from "../doctor/result.js";
@@ -228,6 +230,7 @@ interface AdminInfo {
   publicUrl: string | null;
   tunnel: { running: boolean; url: string | null; provider: string };
   tokenCount: number;
+  authorization: AuthorizationStatus;
   pairingActive: boolean;
   pid: number;
   startedAt: string;
@@ -619,6 +622,13 @@ program
       cloudflareLogin: namedReady ? "not_checked" : "not_applicable",
       publicHealth: "not_checked",
     };
+    let authorization: DoctorAuthorizationResult = {
+      state: "not_configured",
+      clientId: null,
+      proof: null,
+      recoverable: false,
+    };
+    let pairingExpiresAt: number | undefined;
     let chatgptRepair: DoctorChatgptRepair = {
       needed: false,
       connectorAction: "none",
@@ -759,6 +769,33 @@ program
       currentFingerprint,
     };
 
+    if (lastEndpoint?.mcpUrl && !chatgptRepair.needed && !namedRepair.needed) {
+      if (tunnelResult.publicHealth !== "passed") {
+        authorization = {
+          state: "unreachable",
+          clientId: null,
+          proof: null,
+          recoverable: false,
+        };
+        report.oauth = { ok: false, detail: "授权状态无法从当前网络探测确认" };
+      } else if (runtime) {
+        const info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+        authorization = info.authorization;
+        const disposition = authorizationDisposition(authorization);
+        report.oauth = {
+          ok: disposition === "usable",
+          detail: authorization.state === "identity_mismatch"
+            ? authorization.reason
+            : authorization.state,
+        };
+        if (disposition === "authorize" && shouldFix && recoveryLease) {
+          pairingExpiresAt = (
+            await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing")
+          ).expiresAt;
+        }
+      }
+    }
+
     const labels: Record<string, string> = {
       node: "Node.js",
       sandbox: "Sandbox",
@@ -775,6 +812,9 @@ program
       namedRepair,
       endpointIdentity,
       tunnel: tunnelResult,
+      authorization,
+      authorizationPage: CHATGPT_PLUGINS_URL,
+      pairingExpiresAt,
       tunnelFailure,
       bridgeStopped,
       bridgeUnknown,

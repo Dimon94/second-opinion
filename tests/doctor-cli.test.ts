@@ -123,6 +123,14 @@ function runDoctor(
   return runCli("doctor", workspace, stateDir, codexHome, ...args);
 }
 
+async function startFixtureTunnel(runtime: RuntimeState): Promise<{ url: string }> {
+  try {
+    return await adminFetch(runtime, "POST", "/admin/tunnel/start");
+  } catch {
+    return adminFetch(runtime, "POST", "/admin/tunnel/start");
+  }
+}
+
 function isolatedWorkspace(name: string): {
   workspace: string;
   stateDir: string;
@@ -277,6 +285,210 @@ describe("c2c doctor contract", () => {
     });
   });
 
+  it("reuses a protected grant across a stable bridge restart without pairing", async () => {
+    const fixture = isolatedWorkspace("doctor-oauth-restart");
+    dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+    process.env.C2C_STATE_DIR = fixture.stateDir;
+    const tunnel = new FixtureTunnel("fixture-named", (port) => `http://127.0.0.1:${port}`);
+    const first = await startBridge({
+      workspaceRoot: fixture.workspace,
+      port: 0,
+      persistRuntime: true,
+      tunnelProvider: tunnel,
+    });
+    bridges.push(first);
+    const runtime = readRuntimeState()!;
+    const started = await startFixtureTunnel(runtime);
+    const client = first.authStore.registerClient({
+      clientName: "stable-chatgpt-client",
+      redirectUris: ["https://chatgpt.com/oauth/callback"],
+      baseUrl: started.url,
+    });
+    const tokens = first.authStore.issueTokens({
+      identity: first.authStore.identityForClient(
+        started.url,
+        client.clientId,
+        ["workspace.read", "offline_access"]
+      )!,
+    });
+    expect(
+      await fetch(`${started.url}/mcp`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          authorization: `Bearer ${tokens.accessToken}`,
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", method: "ping", id: 1 }),
+      })
+    ).toMatchObject({ status: 200 });
+    writeLastEndpoint({
+      workspaceId: first.workspace.id,
+      port: first.port,
+      publicUrl: started.url,
+      mcpUrl: `${started.url}/mcp`,
+      connectorName: "Codex with ChatGPT",
+    });
+
+    await first.close();
+    const restarted = await startBridge({
+      workspaceRoot: fixture.workspace,
+      port: first.port,
+      persistRuntime: true,
+      tunnelProvider: new FixtureTunnel("fixture-named", (port) => `http://127.0.0.1:${port}`),
+    });
+    bridges.push(restarted);
+    await startFixtureTunnel(readRuntimeState()!);
+
+    const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
+    expect(result.status).toBe(0);
+    expect(parseResult(result.stdout)).toMatchObject({
+      outcome: expect.stringMatching(/^(healthy|repaired)$/),
+      authorization: {
+        state: "healthy",
+        proof: "protected_resource",
+        clientId: client.clientId,
+      },
+      nextAction: { type: expect.not.stringMatching(/^authorize_oauth$/) },
+    });
+    expect(
+      await adminFetch<{ pairingActive: boolean }>(readRuntimeState()!, "GET", "/admin/info")
+    ).toMatchObject({ pairingActive: false });
+  });
+
+  it.each([
+    "unpair",
+    "revoked",
+    "expired",
+    "lost",
+    "invalid_client",
+    "scope_mismatch",
+    "identity_mismatch",
+    "unverified",
+    "access_expired",
+  ] as const)(
+    "classifies a %s persisted grant without guessing",
+    async (failure) => {
+      const fixture = isolatedWorkspace(`doctor-oauth-${failure}`);
+      dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+      process.env.C2C_STATE_DIR = fixture.stateDir;
+      const first = await startBridge({
+        workspaceRoot: fixture.workspace,
+        port: 0,
+        persistRuntime: true,
+        tunnelProvider: new FixtureTunnel("fixture-named", (port) => `http://127.0.0.1:${port}`),
+      });
+      bridges.push(first);
+      const started = await startFixtureTunnel(readRuntimeState()!);
+      const client = first.authStore.registerClient({
+        clientName: "persisted-chatgpt-client",
+        redirectUris: ["https://chatgpt.com/oauth/callback"],
+        baseUrl: started.url,
+      });
+      const tokens = first.authStore.issueTokens({
+        identity: first.authStore.identityForClient(
+          started.url,
+          client.clientId,
+          ["workspace.read", "offline_access"]
+        )!,
+      });
+      writeLastEndpoint({
+        workspaceId: first.workspace.id,
+        port: first.port,
+        publicUrl: started.url,
+        mcpUrl: `${started.url}/mcp`,
+        connectorName: "Codex with ChatGPT",
+      });
+      await first.close();
+
+      const storeFile = path.join(fixture.stateDir, "auth", "store.json");
+      if (failure === "unpair") {
+        expect(
+          (await runCli("unpair", fixture.workspace, fixture.stateDir, fixture.codexHome)).status
+        ).toBe(0);
+      } else if (failure === "revoked") {
+        first.authStore.revokeToken(tokens.refreshToken!);
+      } else if (failure === "lost") {
+        fs.rmSync(storeFile);
+      } else {
+        const persisted = JSON.parse(fs.readFileSync(storeFile, "utf8")) as {
+          clients: Array<{
+            grantedScopes?: string[];
+            grant?: {
+              accessExpiresAt: number;
+              refreshExpiresAt: number | null;
+              binding: { bridgeId: string };
+            };
+          }>;
+        };
+        if (failure === "invalid_client") persisted.clients = [];
+        else if (failure === "expired") {
+          persisted.clients[0].grant!.accessExpiresAt = 0;
+          persisted.clients[0].grant!.refreshExpiresAt = 0;
+        }
+        else if (failure === "access_expired") {
+          persisted.clients[0].grant!.accessExpiresAt = 0;
+        }
+        else if (failure === "unverified") {
+          delete persisted.clients[0].grant;
+        }
+        else if (failure === "identity_mismatch") {
+          persisted.clients[0].grant!.binding.bridgeId += "-changed";
+        }
+        else persisted.clients[0].grantedScopes = [
+          "workspace.read",
+          "workspace.search",
+          "offline_access",
+        ];
+        fs.writeFileSync(storeFile, JSON.stringify(persisted));
+      }
+
+      const restarted = await startBridge({
+        workspaceRoot: fixture.workspace,
+        port: first.port,
+        persistRuntime: true,
+        tunnelProvider: new FixtureTunnel("fixture-named", (port) => `http://127.0.0.1:${port}`),
+      });
+      bridges.push(restarted);
+      await startFixtureTunnel(readRuntimeState()!);
+
+      const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
+      const retry = failure === "unverified" || failure === "access_expired";
+      expect(result.status).toBe(retry ? 1 : 2);
+      expect(parseResult(result.stdout)).toMatchObject({
+        outcome: retry ? "unknown" : "user_action_required",
+        reason: retry
+          ? "probe_inconclusive"
+          : failure === "invalid_client"
+            ? "invalid_client"
+            : "auth_required",
+        authorization: {
+          state: failure === "scope_mismatch" || failure === "identity_mismatch"
+            ? "identity_mismatch"
+            : failure === "access_expired"
+              ? "expired"
+            : failure === "unpair"
+              ? "revoked"
+            : failure === "lost"
+              ? "missing"
+              : failure,
+          ...(failure === "scope_mismatch"
+            ? { reason: "scope_mismatch" }
+            : failure === "identity_mismatch"
+              ? { reason: "bridge_mismatch" }
+              : {}),
+          recoverable: retry,
+        },
+        nextAction: retry
+          ? { type: "retry_wait" }
+          : { type: "authorize_oauth", pairingExpiresAt: expect.any(Number) },
+      });
+      expect(
+        await adminFetch<{ pairingActive: boolean }>(readRuntimeState()!, "GET", "/admin/info")
+      ).toMatchObject({ pairingActive: !retry });
+    }
+  );
+
   it("returns a normalized workspace-scoped action for a saved long chat", async () => {
     const fixture = isolatedWorkspace("doctor-conversation");
     dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
@@ -314,6 +526,7 @@ describe("c2c doctor contract", () => {
       },
       chatgptRepair: { needed: false, connectorAction: "none" },
     });
+    expect(bridge.pairing.hasActiveSession()).toBe(false);
   });
 
   it("opens the retained Project when its conversation is missing without changing bindings", async () => {
@@ -741,11 +954,12 @@ describe("c2c doctor contract", () => {
 
     const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
 
-    expect(result.status).toBe(0);
+    expect(result.status).toBe(2);
     expect(parseResult(result.stdout)).toMatchObject({
-      outcome: "repaired",
-      reason: "local_repairs_completed",
-      nextAction: { type: "create_conversation" },
+      outcome: "user_action_required",
+      reason: "auth_required",
+      nextAction: { type: "authorize_oauth", pairingExpiresAt: expect.any(Number) },
+      authorization: { state: "missing", recoverable: false },
       endpointIdentity: {
         changed: false,
         previousFingerprint: expect.stringMatching(/^sha256:/),
@@ -760,7 +974,7 @@ describe("c2c doctor contract", () => {
       chatgptRepair: { needed: false, connectorAction: "none" },
     });
     expect(tunnel.startCalls).toBe(1);
-    expect(bridge.pairing.hasActiveSession()).toBe(false);
+    expect(bridge.pairing.hasActiveSession()).toBe(true);
   });
 
   it("starts Quick Tunnel without Cloudflare login and reports endpoint replacement fingerprints", async () => {
@@ -790,7 +1004,6 @@ describe("c2c doctor contract", () => {
       tunnelProvider: tunnel,
     });
     bridges.push(bridge);
-
     const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
 
     expect(result.status).toBe(2);
@@ -922,6 +1135,27 @@ describe("c2c doctor contract", () => {
       tunnelProvider: scenario.tunnel,
     });
     bridges.push(bridge);
+    if (scenario.reason === "probe_inconclusive") {
+      const client = bridge.authStore.registerClient({
+        clientName: "unreachable-chatgpt-client",
+        redirectUris: ["https://chatgpt.com/oauth/callback"],
+        baseUrl: "http://127.0.0.1:1",
+      });
+      bridge.authStore.issueTokens({
+        identity: bridge.authStore.identityForClient(
+          "http://127.0.0.1:1",
+          client.clientId,
+          ["workspace.read", "offline_access"]
+        )!,
+      });
+      writeLastEndpoint({
+        workspaceId: workspace.id,
+        port: bridge.port,
+        publicUrl: "http://127.0.0.1:1",
+        mcpUrl: "http://127.0.0.1:1/mcp",
+        connectorName: "Codex with ChatGPT",
+      });
+    }
 
     const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
 
@@ -934,8 +1168,12 @@ describe("c2c doctor contract", () => {
         component: scenario.reason === "cloudflared_missing" ? "missing" : "available",
         publicHealth: scenario.publicHealth,
       },
+      ...(scenario.reason === "probe_inconclusive"
+        ? { authorization: { state: "unreachable" } }
+        : {}),
       chatgptRepair: { needed: false, connectorAction: "none" },
     });
+    expect(bridge.pairing.hasActiveSession()).toBe(false);
   });
 
   it("reports a stopped bridge without mutating diagnose-only state or leaking sensitive output", async () => {
