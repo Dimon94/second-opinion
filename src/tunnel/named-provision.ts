@@ -22,7 +22,7 @@ export interface ListedTunnel {
 
 export interface CloudflaredAccount {
   hasCert(): boolean;
-  login(): Promise<void>;
+  login(onLoginUrl?: (url: string) => void, force?: boolean): Promise<void>;
   listTunnels(): Promise<ListedTunnel[]>;
   createTunnel(name: string): Promise<ListedTunnel>;
   routeDns(tunnelName: string, hostname: string): Promise<void>;
@@ -79,6 +79,17 @@ export function isBenignRouteError(message: string): boolean {
   return /already exists|duplicate|exists as a cname/i.test(message);
 }
 
+export function parseCloudflareLoginUrl(output: string): string | null {
+  const candidate = output.match(/https:\/\/dash\.cloudflare\.com\/argotunnel\?[^\s"'<>]+/i)?.[0];
+  if (!candidate) return null;
+  try {
+    const url = new URL(candidate);
+    return url.protocol === "https:" && url.hostname === "dash.cloudflare.com" ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
 export class ProcessCloudflaredAccount implements CloudflaredAccount {
   constructor(private readonly binaryOverride?: string) {}
 
@@ -96,14 +107,23 @@ export class ProcessCloudflaredAccount implements CloudflaredAccount {
     return hasCloudflaredCert();
   }
 
-  async login(): Promise<void> {
-    if (this.hasCert()) return;
+  async login(onLoginUrl?: (url: string) => void, force = false): Promise<void> {
+    if (this.hasCert() && !force) return;
     const bin = this.binary();
     await new Promise<void>((resolve, reject) => {
-      const child = spawn(bin, ["tunnel", "login"], { stdio: ["ignore", "pipe", "pipe"] });
+      const child = spawn(bin, ["tunnel", "login"], {
+        stdio: ["ignore", "pipe", "pipe"],
+        env: { ...process.env, BROWSER: process.execPath },
+      });
       let output = "";
+      let emittedUrl: string | null = null;
       const collect = (chunk: Buffer): void => {
         output += chunk.toString("utf8");
+        const url = parseCloudflareLoginUrl(output);
+        if (url && url !== emittedUrl) {
+          emittedUrl = url;
+          onLoginUrl?.(url);
+        }
       };
       child.stdout?.on("data", collect);
       child.stderr?.on("data", collect);
@@ -117,7 +137,7 @@ export class ProcessCloudflaredAccount implements CloudflaredAccount {
       });
       child.on("exit", (code) => {
         clearTimeout(timer);
-        if (this.hasCert()) {
+        if (this.hasCert() && (!force || code === 0)) {
           resolve();
           return;
         }
@@ -189,6 +209,7 @@ export async function provisionNamedTunnel(opts: {
   zone: string;
   hostname?: string;
   account?: CloudflaredAccount;
+  onLoginUrl?: (url: string) => void;
 }): Promise<ProvisionNamedResult> {
   const account = opts.account ?? new ProcessCloudflaredAccount();
   let hostname: string;
@@ -202,7 +223,7 @@ export async function provisionNamedTunnel(opts: {
 
   const tunnelName = `c2c-${opts.workspaceId}`;
   try {
-    if (!account.hasCert()) await account.login();
+    if (!account.hasCert()) await account.login(opts.onLoginUrl);
     const tunnel = await account.createTunnel(tunnelName);
     await account.routeDns(tunnel.name, hostname);
     const state = writeTunnelState({

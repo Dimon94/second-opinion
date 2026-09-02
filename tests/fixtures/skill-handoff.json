@@ -1,0 +1,52 @@
+[
+  {
+    "name": "no action",
+    "doctor": { "outcome": "healthy", "reason": "all_checks_passed", "nextAction": { "type": "none" } },
+    "policy": { "browser": "none", "pause": "no", "pairing": "no", "after": "continue" }
+  },
+  {
+    "name": "wait and retry",
+    "doctor": { "outcome": "busy", "reason": "recovery_in_progress", "nextAction": { "type": "retry_wait", "reason": "recovery_in_progress" } },
+    "policy": { "browser": "none", "pause": "no", "pairing": "no", "after": "rerun" }
+  },
+  {
+    "name": "Cloudflare login",
+    "doctor": { "outcome": "user_action_required", "reason": "cloudflare_login_required", "nextAction": { "type": "cloudflare_login", "reason": "cloudflare_login_required" } },
+    "policy": { "browser": "built-in", "pause": "user", "pairing": "no", "after": "rerun" }
+  },
+  {
+    "name": "Connector replacement",
+    "doctor": { "outcome": "user_action_required", "reason": "connector_missing", "nextAction": { "type": "replace_connector", "reason": "connector_missing", "page": "https://chatgpt.com/plugins", "createPage": "https://chatgpt.com/plugins#settings/Connectors?create-connector=true", "connectorName": "Codex with ChatGPT", "endpoint": "https://example.invalid/mcp" } },
+    "policy": { "browser": "built-in", "pause": "user", "pairing": "no", "after": "rerun" }
+  },
+  {
+    "name": "OAuth authorization",
+    "doctor": { "outcome": "user_action_required", "reason": "auth_required", "nextAction": { "type": "authorize_oauth", "reason": "auth_required", "page": "https://chatgpt.com/plugins" } },
+    "policy": { "browser": "built-in", "pause": "user", "pairing": "create", "after": "rerun" }
+  },
+  {
+    "name": "ChatGPT login",
+    "doctor": { "outcome": "user_action_required", "reason": "chatgpt_login_required", "nextAction": { "type": "chatgpt_login", "reason": "chatgpt_login_required", "page": "https://chatgpt.com/" } },
+    "policy": { "browser": "built-in", "pause": "user", "pairing": "no", "after": "rerun" }
+  },
+  {
+    "name": "open conversation after local recovery",
+    "doctor": { "outcome": "repaired", "reason": "local_repairs_completed", "nextAction": { "type": "open_conversation", "reason": "local_repairs_completed", "page": "https://chatgpt.com/c/example" } },
+    "policy": { "browser": "built-in", "pause": "no", "pairing": "no", "after": "verify" }
+  },
+  {
+    "name": "create conversation after local recovery",
+    "doctor": { "outcome": "healthy", "reason": "all_checks_passed", "nextAction": { "type": "create_conversation", "reason": "conversation_missing" } },
+    "policy": { "browser": "built-in", "pause": "no", "pairing": "no", "after": "verify" }
+  },
+  {
+    "name": "administrator approval",
+    "doctor": { "outcome": "user_action_required", "reason": "administrator_approval_required", "nextAction": { "type": "administrator_approval", "reason": "administrator_approval_required", "page": "https://chatgpt.com/admin/approval" } },
+    "policy": { "browser": "built-in", "pause": "user", "pairing": "no", "after": "rerun" }
+  },
+  {
+    "name": "manual recovery",
+    "doctor": { "outcome": "blocked", "reason": "checks_failed", "nextAction": { "type": "manual_recovery", "reason": "checks_failed" } },
+    "policy": { "browser": "none", "pause": "user", "pairing": "no", "after": "stop" }
+  }
+]

@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
+import path from "node:path";
 import type { ChildProcess } from "node:child_process";
 import { PassThrough } from "node:stream";
 import { findBinary } from "../src/tunnel/detect.js";
@@ -17,8 +18,10 @@ import { hostnameSlug, parseZoneInput, suggestedNamedHostname } from "../src/tun
 import {
   chooseQuickTunnel,
   isBenignRouteError,
+  parseCloudflareLoginUrl,
   parseCreatedTunnel,
   parseTunnelList,
+  ProcessCloudflaredAccount,
   provisionNamedTunnel,
   type CloudflaredAccount,
 } from "../src/tunnel/named-provision.js";
@@ -28,6 +31,7 @@ import { cleanup, isolateStateDir, makeTmpDir, write } from "./helpers.js";
 const stateDirs: string[] = [];
 const previousStateDir = process.env.C2C_STATE_DIR;
 const previousCloudflaredPath = process.env.C2C_CLOUDFLARED_PATH;
+const previousOriginCert = process.env.TUNNEL_ORIGIN_CERT;
 const QUICK_URL = "https://random-words-here-1234.trycloudflare.com";
 type FetchImpl = NonNullable<CloudflaredQuickTunnelOptions["fetchImpl"]>;
 
@@ -68,6 +72,8 @@ afterEach(() => {
   else process.env.C2C_STATE_DIR = previousStateDir;
   if (previousCloudflaredPath === undefined) delete process.env.C2C_CLOUDFLARED_PATH;
   else process.env.C2C_CLOUDFLARED_PATH = previousCloudflaredPath;
+  if (previousOriginCert === undefined) delete process.env.TUNNEL_ORIGIN_CERT;
+  else process.env.TUNNEL_ORIGIN_CERT = previousOriginCert;
 });
 
 describe("findBinary", () => {
@@ -293,6 +299,55 @@ describe("named hostname helpers", () => {
 });
 
 describe("cloudflared output parsers", () => {
+  it("extracts only the Cloudflare account login page", () => {
+    expect(
+      parseCloudflareLoginUrl(
+        "Please open https://dash.cloudflare.com/argotunnel?callback=https%3A%2F%2Flogin.cloudflareaccess.org%2Fabc"
+      )
+    ).toBe(
+      "https://dash.cloudflare.com/argotunnel?callback=https%3A%2F%2Flogin.cloudflareaccess.org%2Fabc"
+    );
+    expect(parseCloudflareLoginUrl("https://evil.example/argotunnel?callback=abc")).toBeNull();
+  });
+
+  it.runIf(process.platform !== "win32")(
+    "surfaces the login page without launching an external browser",
+    async () => {
+      const dir = makeTmpDir("cloudflared-login-binary");
+      stateDirs.push(dir);
+      process.env.TUNNEL_ORIGIN_CERT = path.join(dir, "cert.pem");
+      fs.writeFileSync(process.env.TUNNEL_ORIGIN_CERT, "stale");
+      const binary = write(
+        dir,
+        "cloudflared-fixture",
+        "#!/bin/sh\ntest -n \"$BROWSER\" || exit 9\nprintf '%s\\n' 'Open https://dash.cloudflare.com/argotunnel?callback=fixture' >&2\nprintf fresh > \"$TUNNEL_ORIGIN_CERT\"\n"
+      );
+      fs.chmodSync(binary, 0o700);
+      const pages: string[] = [];
+
+      await new ProcessCloudflaredAccount(binary).login((page) => pages.push(page), true);
+
+      expect(pages).toEqual(["https://dash.cloudflare.com/argotunnel?callback=fixture"]);
+      expect(fs.readFileSync(process.env.TUNNEL_ORIGIN_CERT, "utf8")).toBe("fresh");
+    }
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "does not accept a failed forced login just because the stale certificate remains",
+    async () => {
+      const dir = makeTmpDir("cloudflared-login-failure");
+      stateDirs.push(dir);
+      process.env.TUNNEL_ORIGIN_CERT = path.join(dir, "cert.pem");
+      fs.writeFileSync(process.env.TUNNEL_ORIGIN_CERT, "stale");
+      const binary = write(dir, "cloudflared-fixture", "#!/bin/sh\nexit 7\n");
+      fs.chmodSync(binary, 0o700);
+
+      await expect(new ProcessCloudflaredAccount(binary).login(undefined, true)).rejects.toThrow(
+        /exit 7/
+      );
+    }
+  );
+
   it("reads a tunnel list table", () => {
     const output = `
 ID                                   NAME          CREATED

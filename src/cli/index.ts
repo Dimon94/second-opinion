@@ -62,6 +62,7 @@ import { sanitizeDiagnosticText, sanitizeDiagnosticValue } from "../execution/sa
 import {
   createDoctorResult,
   createRecoveryLeaseDoctorResult,
+  applyDoctorBrowserGate,
   authorizationDisposition,
   DOCTOR_EXIT_STATUS,
   renderDoctorResult,
@@ -70,6 +71,7 @@ import {
   type DoctorAuthorizationResult,
   type DoctorNamedRepair,
   type DoctorTunnelResult,
+  type DoctorBrowserGate,
 } from "../doctor/result.js";
 import { acquireRecoveryLease, type RecoveryLeaseHandle } from "../doctor/lease.js";
 
@@ -200,6 +202,18 @@ function tunnelChoicePayload(workspace: Workspace, zoneHint?: string): Record<st
   };
 }
 
+function emitCloudflareLoginAction(page: string, json: boolean): void {
+  if (json) {
+    say(JSON.stringify({
+      outcome: "user_action_required",
+      reason: "cloudflare_login_required",
+      nextAction: { type: "cloudflare_login", reason: "cloudflare_login_required", page },
+    }));
+  } else {
+    say(`请在 Codex 内置浏览器打开：${page}`);
+  }
+}
+
 function trySandboxAllow():
   | { ok: true; added: boolean; alreadyAllowed: boolean; stateDir: string; configPath: string }
   | { ok: false; added: false; alreadyAllowed: false; error: string } {
@@ -319,76 +333,6 @@ program
     }
   });
 
-// ---------------------------------------------------------------- setup
-
-program
-  .command("setup")
-  .description("First-time setup: bridge + secure connection + pairing code")
-  .option("-w, --workspace <path>")
-  .option("--no-tunnel", "local-only setup (development)")
-  .option("--json", "machine-readable output", false)
-  .action(async (opts: { workspace?: string; tunnel: boolean; json: boolean }) => {
-    const root = resolveWorkspace(opts.workspace);
-    try {
-      if (!opts.json) {
-        say(PRODUCT_NAME);
-        say("");
-        say("正在连接 ChatGPT…");
-        say("");
-      }
-      const sandbox = trySandboxAllow();
-      const { runtime, info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
-      const connectorName = mcpUrl
-        ? persistWorkspaceEndpoint({
-            workspaceId: info.workspaceId,
-            workspaceName: info.workspaceName,
-            port: runtime.port,
-            publicUrl: info.publicUrl,
-            mcpUrl,
-          })
-        : connectorNameFor({
-            workspaceName: info.workspaceName,
-            workspaceId: info.workspaceId,
-            previousName: readLastEndpoint(info.workspaceId)?.connectorName,
-            hadEndpointBefore: Boolean(readLastEndpoint(info.workspaceId)),
-          });
-      const pairingResult = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
-      const tunnelState = readTunnelState(info.workspaceId);
-      if (opts.json) {
-        say(
-          JSON.stringify({
-            ok: true,
-            workspaceId: info.workspaceId,
-            workspaceName: info.workspaceName,
-            connectorName,
-            mcpUrl: mcpUrl ?? `http://127.0.0.1:${runtime.port}/mcp`,
-            local: mcpUrl === null,
-            pairingCode: pairingResult.code,
-            pairingExpiresAt: pairingResult.expiresAt,
-            sandbox,
-            tunnel: {
-              mode: isNamedTunnelReady(tunnelState) ? "named" : "quick",
-              hostname: tunnelState.hostname ?? null,
-              fallback: Boolean(tunnelState.fallbackReason),
-            },
-          })
-        );
-        return;
-      }
-      check(`当前项目已识别（${info.workspaceName}）`);
-      check("Workspace Bridge 已启动");
-      if (mcpUrl) check("安全连接已建立");
-      say("");
-      say(`连接地址：${mcpUrl ?? `http://127.0.0.1:${runtime.port}/mcp`}`);
-      say(`配对码：${pairingResult.code}（${Math.round((pairingResult.expiresAt - Date.now()) / 60000)} 分钟内有效）`);
-      say("");
-      say("下一步：在 ChatGPT 的连接器设置中添加以上地址（OAuth），并在授权页输入配对码。");
-      say("如果你在使用 Codex Skill，这一步会自动完成。");
-    } catch (error) {
-      handleCliError(error, opts.json);
-    }
-  });
-
 // ---------------------------------------------------------------- stop / restart
 
 program
@@ -462,13 +406,30 @@ program
 
 program
   .command("doctor")
+  .alias("setup")
   .description("Diagnose and auto-repair the connection")
   .option("-w, --workspace <path>")
   .option("--no-fix", "diagnose only, do not repair")
   .option("--diagnose-only", "diagnose only, do not repair", false)
+  .option("--no-tunnel", "do not start or recover a public connection")
+  .option("--browser-gate <gate>", "observed ChatGPT gate: chatgpt_login or administrator_approval")
+  .option("--browser-page <url>", "current ChatGPT page for an observed browser gate")
   .option("--json", "machine-readable output", false)
-  .action(async (opts: { workspace?: string; fix: boolean; diagnoseOnly: boolean; json: boolean }) => {
+  .action(async (opts: {
+    workspace?: string;
+    fix: boolean;
+    diagnoseOnly: boolean;
+    tunnel: boolean;
+    browserGate?: string;
+    browserPage?: string;
+    json: boolean;
+  }) => {
     const root = resolveWorkspace(opts.workspace);
+    const browserGate = opts.browserGate as DoctorBrowserGate | undefined;
+    if (browserGate && browserGate !== "chatgpt_login" && browserGate !== "administrator_approval") {
+      handleCliError(new Error("browser-gate must be chatgpt_login or administrator_approval"), opts.json);
+      return;
+    }
     const shouldFix = opts.fix && !opts.diagnoseOnly;
     const report: Record<string, DoctorCheck> = {};
     const results: string[] = [];
@@ -628,7 +589,6 @@ program
       proof: null,
       recoverable: false,
     };
-    let pairingExpiresAt: number | undefined;
     let chatgptRepair: DoctorChatgptRepair = {
       needed: false,
       connectorAction: "none",
@@ -676,6 +636,7 @@ program
         expectedPublic &&
         tunnelResult.publicHealth !== "passed" &&
         shouldFix &&
+        opts.tunnel &&
         recoveryLease &&
         !tunnelFailure
       ) {
@@ -725,8 +686,8 @@ program
           : connectorName;
         chatgptRepair = {
           ...chatgptRepair,
-          needed: action === "update",
-          reason: action === "update" ? "address_reclaimed" : undefined,
+          needed: action !== "none",
+          reason: action === "update" ? "address_reclaimed" : action === "create" ? "connector_missing" : undefined,
           connectorAction: action,
           connectorName: boundName,
           userMessage: action === "update" ? reclaimUserMessage(boundName) : undefined,
@@ -788,11 +749,6 @@ program
             ? authorization.reason
             : authorization.state,
         };
-        if (disposition === "authorize" && shouldFix && recoveryLease) {
-          pairingExpiresAt = (
-            await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing")
-          ).expiresAt;
-        }
       }
     }
 
@@ -805,7 +761,7 @@ program
       oauth: "OAuth",
       tunnel: "Tunnel",
     };
-    const result = createDoctorResult({
+    const result = applyDoctorBrowserGate(createDoctorResult({
       report,
       repairs: results,
       chatgptRepair,
@@ -814,14 +770,13 @@ program
       tunnel: tunnelResult,
       authorization,
       authorizationPage: CHATGPT_PLUGINS_URL,
-      pairingExpiresAt,
       tunnelFailure,
       bridgeStopped,
       bridgeUnknown,
       conversation: workspace
         ? { workspaceId: workspace.id, ...resolveConversation(readSession(workspace.id)) }
         : null,
-    });
+    }), browserGate, opts.browserPage);
     process.exitCode = DOCTOR_EXIT_STATUS[result.outcome];
     say(
       opts.json
@@ -1314,6 +1269,7 @@ tunnelCmd
         workspaceName: workspace.name,
         zone,
         hostname: opts.hostname,
+        onLoginUrl: (page) => emitCloudflareLoginAction(page, opts.json),
       });
       if (await findLiveBridge(workspace.id)) await stopBridge(root);
       const payload = {
@@ -1339,11 +1295,12 @@ tunnelCmd
   .command("login")
   .description("Open the Cloudflare login window used by a named hostname")
   .option("--json", "machine-readable output", false)
-  .action(async (opts: { json: boolean }) => {
+  .option("--force", "replace an existing rejected Cloudflare login certificate", false)
+  .action(async (opts: { force: boolean; json: boolean }) => {
     try {
       if (!opts.json) say(NAMED_LOGIN_PROMPT);
       const account = new ProcessCloudflaredAccount();
-      await account.login();
+      await account.login((page) => emitCloudflareLoginAction(page, opts.json), opts.force);
       const payload = { ok: true, loggedIn: hasCloudflaredCert() };
       if (opts.json) say(JSON.stringify(payload));
       else check("Cloudflare 已登录");

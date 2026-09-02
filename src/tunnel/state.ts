@@ -58,7 +58,7 @@ export const TUNNEL_CHOICE_PROMPT = `连 ChatGPT 之前，有一条可选的。
 没有账号也完全能用。你选哪个？如果有域名，直接告诉我域名（例如 example.com）。`;
 
 export const NAMED_LOGIN_PROMPT =
-  "会弹出浏览器，请登录 Cloudflare 并选中你的域名，完成后告诉我「好了」。";
+  "我会在 Codex 内置浏览器打开 Cloudflare。请登录并选中你的域名，完成后告诉我「好了」。";
 
 export const NAMED_FALLBACK_MESSAGE =
   "这次先用临时地址。功能一样，以后修连接可能会更慢。想改成固定域名时再说一声。";

@@ -285,6 +285,185 @@ describe("c2c doctor contract", () => {
     });
   });
 
+  it("uses the doctor contract for setup and creates pairing only for OAuth authorization", async () => {
+    const fixture = isolatedWorkspace("doctor-setup-handoff");
+    dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+    process.env.C2C_STATE_DIR = fixture.stateDir;
+    const workspace = new Workspace(fixture.workspace);
+    writeTunnelState({
+      workspaceId: workspace.id,
+      preference: "quick",
+      askedAt: new Date().toISOString(),
+      provider: "cloudflare-quick",
+    });
+    const bridge = await startBridge({
+      workspaceRoot: fixture.workspace,
+      port: 0,
+      persistRuntime: true,
+      tunnelProvider: new FixtureTunnel("cloudflare-quick", (port) => `http://127.0.0.1:${port}`),
+    });
+    bridges.push(bridge);
+
+    const setup = await runCli(
+      "setup",
+      fixture.workspace,
+      fixture.stateDir,
+      fixture.codexHome,
+      "--json"
+    );
+    expect(setup.status).toBe(2);
+    expect(parseResult(setup.stdout)).toMatchObject({
+      version: 1,
+      outcome: "user_action_required",
+      reason: "connector_missing",
+      nextAction: {
+        type: "replace_connector",
+        reason: "connector_missing",
+        connectorName: expect.any(String),
+        endpoint: `${bridge.localBaseUrl()}/mcp`,
+      },
+    });
+    expect(
+      await adminFetch<{ pairingActive: boolean }>(readRuntimeState()!, "GET", "/admin/info")
+    ).toMatchObject({ pairingActive: false });
+
+    const authorize = await runDoctor(
+      fixture.workspace,
+      fixture.stateDir,
+      fixture.codexHome,
+      "--json"
+    );
+    expect(authorize.status).toBe(2);
+    expect(parseResult(authorize.stdout)).toMatchObject({
+      outcome: "user_action_required",
+      reason: "auth_required",
+      nextAction: {
+        type: "authorize_oauth",
+        reason: "auth_required",
+      },
+    });
+    expect(
+      await adminFetch<{ pairingActive: boolean }>(readRuntimeState()!, "GET", "/admin/info")
+    ).toMatchObject({ pairingActive: false });
+
+    const rejectedPage = await runDoctor(
+      fixture.workspace,
+      fixture.stateDir,
+      fixture.codexHome,
+      "--json",
+      "--browser-gate",
+      "chatgpt_login",
+      "--browser-page",
+      "https://evil.example/login"
+    );
+    expect(rejectedPage.status).toBe(1);
+    expect(parseResult(rejectedPage.stdout)).toMatchObject({
+      outcome: "blocked",
+      reason: "checks_failed",
+      nextAction: { type: "manual_recovery", reason: "checks_failed" },
+    });
+
+    const pairing = await runCli(
+      "pair",
+      fixture.workspace,
+      fixture.stateDir,
+      fixture.codexHome,
+      "--json"
+    );
+    expect(pairing.status).toBe(0);
+    expect(parseResult(pairing.stdout)).toMatchObject({
+      ok: true,
+      pairingCode: expect.any(String),
+      expiresAt: expect.any(Number),
+    });
+    expect(
+      await adminFetch<{ pairingActive: boolean }>(readRuntimeState()!, "GET", "/admin/info")
+    ).toMatchObject({ pairingActive: true });
+  });
+
+  it.each([
+    ["chatgpt_login", "chatgpt_login_required", "chatgpt_login", "https://chatgpt.com/auth/login", "https://chatgpt.com/auth/login"],
+    ["administrator_approval", "administrator_approval_required", "administrator_approval", "https://chatgpt.com/auth/login?next=%2Fplugins", "https://chatgpt.com/auth/login?next=%2Fplugins"],
+  ] as const)("normalizes an observed %s gate through public doctor JSON", async (gate, reason, action, page, expectedPage) => {
+    const fixture = isolatedWorkspace(`doctor-browser-${gate}`);
+    dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+    process.env.C2C_STATE_DIR = fixture.stateDir;
+    const workspace = new Workspace(fixture.workspace);
+    writeTunnelState({
+      workspaceId: workspace.id,
+      preference: "quick",
+      askedAt: new Date().toISOString(),
+      provider: "cloudflare-quick",
+    });
+    const bridge = await startBridge({
+      workspaceRoot: fixture.workspace,
+      port: 0,
+      persistRuntime: true,
+      tunnelProvider: new FixtureTunnel("cloudflare-quick", (port) => `http://127.0.0.1:${port}`),
+    });
+    bridges.push(bridge);
+
+    const result = await runDoctor(
+      fixture.workspace,
+      fixture.stateDir,
+      fixture.codexHome,
+      "--json",
+      "--browser-gate",
+      gate,
+      "--browser-page",
+      page
+    );
+
+    expect(result.status).toBe(2);
+    expect(parseResult(result.stdout)).toMatchObject({
+      outcome: "user_action_required",
+      reason,
+      nextAction: {
+        type: action,
+        reason,
+        page: expectedPage,
+      },
+    });
+  });
+
+  it("does not recover a saved public connection for setup --no-tunnel", async () => {
+    const fixture = isolatedWorkspace("doctor-setup-no-tunnel");
+    dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+    process.env.C2C_STATE_DIR = fixture.stateDir;
+    const workspace = new Workspace(fixture.workspace);
+    writeTunnelState({
+      workspaceId: workspace.id,
+      preference: "quick",
+      askedAt: new Date().toISOString(),
+      provider: "cloudflare-quick",
+    });
+    const tunnel = new FixtureTunnel("cloudflare-quick", (port) => `http://127.0.0.1:${port}`);
+    const bridge = await startBridge({
+      workspaceRoot: fixture.workspace,
+      port: 0,
+      persistRuntime: true,
+      tunnelProvider: tunnel,
+    });
+    bridges.push(bridge);
+
+    const result = await runCli(
+      "setup",
+      fixture.workspace,
+      fixture.stateDir,
+      fixture.codexHome,
+      "--no-tunnel",
+      "--json"
+    );
+
+    expect(result.status).toBe(1);
+    expect(parseResult(result.stdout)).toMatchObject({
+      outcome: "unknown",
+      reason: "probe_inconclusive",
+      nextAction: { type: "retry_wait" },
+    });
+    expect(tunnel.startCalls).toBe(0);
+  });
+
   it("reuses a protected grant across a stable bridge restart without pairing", async () => {
     const fixture = isolatedWorkspace("doctor-oauth-restart");
     dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
@@ -481,11 +660,11 @@ describe("c2c doctor contract", () => {
         },
         nextAction: retry
           ? { type: "retry_wait" }
-          : { type: "authorize_oauth", pairingExpiresAt: expect.any(Number) },
+          : { type: "authorize_oauth" },
       });
       expect(
         await adminFetch<{ pairingActive: boolean }>(readRuntimeState()!, "GET", "/admin/info")
-      ).toMatchObject({ pairingActive: !retry });
+      ).toMatchObject({ pairingActive: false });
     }
   );
 
@@ -958,7 +1137,7 @@ describe("c2c doctor contract", () => {
     expect(parseResult(result.stdout)).toMatchObject({
       outcome: "user_action_required",
       reason: "auth_required",
-      nextAction: { type: "authorize_oauth", pairingExpiresAt: expect.any(Number) },
+      nextAction: { type: "authorize_oauth" },
       authorization: { state: "missing", recoverable: false },
       endpointIdentity: {
         changed: false,
@@ -974,7 +1153,7 @@ describe("c2c doctor contract", () => {
       chatgptRepair: { needed: false, connectorAction: "none" },
     });
     expect(tunnel.startCalls).toBe(1);
-    expect(bridge.pairing.hasActiveSession()).toBe(true);
+    expect(bridge.pairing.hasActiveSession()).toBe(false);
   });
 
   it("starts Quick Tunnel without Cloudflare login and reports endpoint replacement fingerprints", async () => {

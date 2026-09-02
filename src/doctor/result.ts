@@ -18,11 +18,14 @@ export type DoctorReason =
   | "bridge_stopped"
   | "transport_down"
   | "endpoint_changed"
+  | "connector_missing"
   | "auth_required"
   | "invalid_client"
   | "workspace_denied"
   | "conversation_missing"
   | "cloudflare_login_required"
+  | "chatgpt_login_required"
+  | "administrator_approval_required"
   | "cloudflared_missing"
   | "probe_inconclusive"
   | "checks_failed";
@@ -35,14 +38,15 @@ export type DoctorNextAction =
       type: "replace_connector";
       reason: DoctorReason;
       page: string;
+      createPage: string;
       connectorName: string;
       endpoint: string | null;
     }
-  | { type: "authorize_oauth"; reason: DoctorReason; page: string; pairingExpiresAt?: number }
+  | { type: "authorize_oauth"; reason: DoctorReason; page: string }
   | { type: "chatgpt_login"; reason: DoctorReason; page: string }
   | { type: "open_conversation"; reason: DoctorReason; page?: string }
   | { type: "create_conversation"; reason: DoctorReason; page?: string }
-  | { type: "administrator_approval"; reason: DoctorReason; page?: string }
+  | { type: "administrator_approval"; reason: DoctorReason; page: string }
   | { type: "manual_recovery"; reason: DoctorReason };
 
 export interface DoctorCheck {
@@ -192,7 +196,6 @@ export function createDoctorResult(input: {
   tunnel: DoctorTunnelResult;
   authorization: DoctorAuthorizationResult;
   authorizationPage: string;
-  pairingExpiresAt?: number;
   tunnelFailure?: "cloudflared_missing" | "transport_down" | "probe_inconclusive";
   bridgeStopped: boolean;
   bridgeUnknown: boolean;
@@ -249,15 +252,19 @@ export function createDoctorResult(input: {
     };
   }
   if (input.chatgptRepair.needed) {
+    const reason: DoctorReason = input.chatgptRepair.connectorAction === "create"
+      ? "connector_missing"
+      : "endpoint_changed";
     return {
       ...base,
       outcome: "user_action_required",
-      reason: "endpoint_changed",
+      reason,
       safeRetry: false,
       nextAction: {
         type: "replace_connector",
-        reason: "endpoint_changed",
-        page: input.chatgptRepair.pages.createConnector,
+        reason,
+        page: input.chatgptRepair.pages.plugins,
+        createPage: input.chatgptRepair.pages.createConnector,
         connectorName: input.chatgptRepair.connectorName,
         endpoint: input.chatgptRepair.mcpUrl,
       },
@@ -284,7 +291,6 @@ export function createDoctorResult(input: {
         type: "authorize_oauth",
         reason,
         page: input.authorizationPage,
-        pairingExpiresAt: input.pairingExpiresAt,
       },
     };
   }
@@ -320,6 +326,64 @@ export function createDoctorResult(input: {
     reason: "checks_failed",
     safeRetry: false,
     nextAction: { type: "manual_recovery", reason: "checks_failed" },
+  };
+}
+
+export type DoctorBrowserGate = "chatgpt_login" | "administrator_approval";
+
+function safeChatgptPage(page?: string): string | undefined {
+  if (!page) return undefined;
+  try {
+    const url = new URL(page);
+    if (url.protocol !== "https:") return undefined;
+    if (url.hostname !== "chatgpt.com" && !url.hostname.endsWith(".chatgpt.com")) return undefined;
+    return url.href;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Convert an observed ChatGPT browser interruption into the same one-action doctor contract. */
+export function applyDoctorBrowserGate(
+  result: DoctorResult,
+  gate?: DoctorBrowserGate,
+  page?: string
+): DoctorResult {
+  if (!gate) return result;
+  if (
+    result.nextAction.type === "retry_wait" ||
+    result.nextAction.type === "manual_recovery" ||
+    result.nextAction.type === "cloudflare_login"
+  ) {
+    return result;
+  }
+  const safePage = safeChatgptPage(page);
+  if (!safePage) {
+    return {
+      ...result,
+      outcome: "blocked",
+      reason: "checks_failed",
+      safeRetry: false,
+      nextAction: { type: "manual_recovery", reason: "checks_failed" },
+    };
+  }
+  if (gate === "chatgpt_login") {
+    const reason = "chatgpt_login_required";
+    return {
+      ...result,
+      outcome: "user_action_required",
+      reason,
+      safeRetry: false,
+      nextAction: { type: "chatgpt_login", reason, page: safePage },
+    };
+  }
+  const reason = "administrator_approval_required";
+  return {
+    ...result,
+    outcome: "user_action_required",
+    reason,
+    safeRetry: false,
+    nextAction: { type: "administrator_approval", reason, page: safePage },
   };
 }
 
