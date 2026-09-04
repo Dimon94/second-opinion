@@ -69,14 +69,15 @@ admin-token-protected API; its PID, port, tunnel and authorization state stay
 unchanged. Only a missing runtime or a positively dead PID permits a replacement
 process. The runtime record follows the active workspace; users never see ports.
 
-**Tunnel**: default is a Cloudflare Quick Tunnel (`cloudflared tunnel --url …`).
-The URL changes per start, so `c2c doctor` can restart it and tell the Skill to
-Delete + recreate the machine-global ChatGPT connector. A workspace may instead
-choose a machine-global named hostname once (`c2c tunnel choose --mode named`). The Skill asks
-before the first public URL exists; `cloudflared tunnel login` is the only extra
-user step. Tunnel name, hostname and preference live under the OS state dir
+**Tunnel**: a machine-global Cloudflare Named Tunnel is the recommended stable
+setup (`c2c tunnel choose --mode named`). The Skill asks before the first public
+URL exists; `cloudflared tunnel login` is the only extra user step. Tunnel name,
+hostname and preference live under the OS state dir
 (`tunnels/global.json`), never in the project. Named starts use
 `cloudflared tunnel --url … run <name>` so the public URL stays stable. If named
 provisioning fails, C2C falls back to Quick Tunnel. If a named tunnel later
 drops, doctor asks for a Cloudflare re-login (`namedRepair`) instead of
-rotating the ChatGPT connector.
+rotating the ChatGPT connector. Quick Tunnel (`cloudflared tunnel --url …`) is
+the no-domain fallback; its URL changes per start, so doctor tells the Skill to
+delete and recreate the machine-global **Second Opinion** connector before a new
+OAuth authorization.

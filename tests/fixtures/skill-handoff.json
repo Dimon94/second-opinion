@@ -16,7 +16,7 @@
   },
   {
     "name": "Connector replacement",
-    "doctor": { "outcome": "user_action_required", "reason": "connector_missing", "nextAction": { "type": "replace_connector", "reason": "connector_missing", "page": "https://chatgpt.com/plugins", "createPage": "https://chatgpt.com/plugins#settings/Connectors?create-connector=true", "connectorName": "Codex with ChatGPT", "endpoint": "https://example.invalid/mcp" } },
+    "doctor": { "outcome": "user_action_required", "reason": "connector_missing", "nextAction": { "type": "replace_connector", "reason": "connector_missing", "page": "https://chatgpt.com/plugins", "createPage": "https://chatgpt.com/plugins#settings/Connectors?create-connector=true", "connectorName": "Second Opinion", "endpoint": "https://example.invalid/mcp" } },
     "policy": { "browser": "built-in", "pause": "user", "pairing": "no", "after": "rerun" }
   },
   {

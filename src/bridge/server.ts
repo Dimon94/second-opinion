@@ -215,6 +215,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       publicUrl: publicBaseUrl,
       tunnel: tunnel.status(),
       tokenCount: authStore.tokenCount(),
+      capabilities: { authReload: true },
       authorization: authStore.authorizationStatus(
         publicBaseUrl ?? `http://${host}:${port}`
       ),

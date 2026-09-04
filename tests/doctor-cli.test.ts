@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { createServer } from "node:http";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
@@ -316,6 +317,68 @@ describe("c2c doctor contract", () => {
       nextAction: { type: "create_conversation", reason: "conversation_missing" },
       conversation: { mode: "project", workspaceId: expect.any(String) },
     });
+  });
+
+  it("replaces a healthy bridge without auth-reload capability before migrating", async () => {
+    const fixture = isolatedWorkspace("doctor-legacy-bridge");
+    dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+    process.env.C2C_STATE_DIR = fixture.stateDir;
+    const workspace = new Workspace(fixture.workspace);
+    const legacy = createServer((req, res) => {
+      res.setHeader("content-type", "application/json");
+      if (req.url === "/health") {
+        res.end(JSON.stringify({ service: SERVICE_NAME, version: VERSION, workspaceId: workspace.id, status: "ok" }));
+        return;
+      }
+      if (req.url === "/admin/info") {
+        res.end(JSON.stringify({ workspaceId: workspace.id, authorization: { state: "healthy" } }));
+        return;
+      }
+      if (req.url === "/admin/shutdown" && req.method === "POST") {
+        res.end(JSON.stringify({ shuttingDown: true }));
+        setTimeout(() => legacy.close(), 10);
+        return;
+      }
+      res.statusCode = 404;
+      res.end("{}");
+    });
+    await new Promise<void>((resolve) => legacy.listen(0, "127.0.0.1", resolve));
+    const address = legacy.address();
+    expect(address && typeof address === "object").toBe(true);
+    writeRuntimeState({
+      service: SERVICE_NAME,
+      version: VERSION,
+      workspaceId: workspace.id,
+      workspaceRoot: workspace.root,
+      pid: process.pid,
+      port: (address as { port: number }).port,
+      adminToken: "legacy-admin-token",
+      publicUrl: null,
+      startedAt: new Date().toISOString(),
+    });
+    writeSecureJson(path.join(fixture.stateDir, "auth", `${workspace.id}.json`), {
+      clients: [{ clientId: "legacy-client", redirectUris: [], createdAt: "2026-01-01" }],
+      tokens: [],
+    });
+
+    try {
+      const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
+
+      expect(result.status).toBe(2);
+      expect(result.stderr).toBe("");
+      expect(parseResult(result.stdout)).toMatchObject({
+        version: 1,
+        outcome: "user_action_required",
+        reason: "auth_required",
+        repairs: expect.arrayContaining(["已自动启动 Bridge"]),
+        nextAction: { type: "authorize_oauth", reason: "auth_required" },
+      });
+    } finally {
+      await stopSpawnedBridge(fixture.workspace, fixture.stateDir);
+      if (legacy.listening) {
+        await new Promise<void>((resolve, reject) => legacy.close((error) => error ? reject(error) : resolve()));
+      }
+    }
   });
 
   it("uses the doctor contract for setup and creates pairing only for OAuth authorization", async () => {
@@ -1090,7 +1153,11 @@ describe("c2c doctor contract", () => {
 
     const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
     expect(result.status).toBe(1);
-    expect(result.stdout).toContain("✗");
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      outcome: "blocked",
+      reason: "checks_failed",
+      nextAction: { type: "manual_recovery" },
+    });
     expect(fs.existsSync(recoveryLeasePath(fixture.stateDir))).toBe(false);
   });
 

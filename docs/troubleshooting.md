@@ -42,12 +42,13 @@ second bridge and do not Delete the ChatGPT connector. Wait and run doctor
 again. The local process may still be running.
 
 ### Everything was quit and ChatGPT can no longer connect
-Quitting Codex / the terminal stops the public address. The next `c2c doctor`
-starts a new address and sets `chatgptRepair.needed`. The Skill should tell the
-user that the old address expired, then **Delete** the machine-global
-connector (`chatgptRepair.connectorName`) and create it again with the new
-address (never click Reconnect — the old URL is dead). Other workspaces reuse
-that connector while the bridge switches its one active canonical root.
+With the recommended Named Tunnel, the next `c2c doctor` restarts the Bridge and
+Tunnel at the same endpoint, then reuses the Second Opinion grant and saved
+conversation. With Quick Tunnel, doctor starts a new address and sets
+`chatgptRepair.needed`; **Delete** the machine-global connector and create it
+again with the new address (never click Reconnect — the old URL is dead). Other
+workspaces reuse that connector while the bridge switches its active canonical
+root.
 
 Fixed ChatGPT pages for first-time setup and later repair (do not hunt the UI):
 
@@ -66,9 +67,16 @@ the connector; the address did not change.
 ### I have a Cloudflare domain and want a stable hostname
 During first-time setup (or the next coding session, once), say you have a
 Cloudflare account and give the domain. Codex opens a browser for Cloudflare
-login, then keeps one hostname such as `c2c-bridge.your-domain.com`. To stay on the temporary
-address, say you do not have a domain. Switching later: tell Codex you want
-the stable hostname; it runs `c2c tunnel choose --mode named --zone <domain>`.
+login, then keeps one hostname such as `advisor.your-domain.com`. This is the
+recommended stable setup. To stay on the temporary address, say you do not have
+a domain. Switching later: tell Codex you want the stable hostname; it runs
+`c2c tunnel choose --mode named --zone <domain>`.
+
+### Human confirmation and supported scope
+Codex pauses at the visible browser gates: ChatGPT/Cloudflare login, MFA or
+CAPTCHA, Cloudflare authorization, Connector deletion/creation, OAuth consent,
+and administrator approval. The recovery workflow does not use OpenCLI, Secure
+MCP Tunnel, or an unsupported ChatGPT Connector CRUD API.
 
 ### "配对码无效/过期"
 Pairing codes are one-time and expire after ~5 minutes:

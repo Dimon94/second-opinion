@@ -368,9 +368,14 @@ describe("discovery metadata", () => {
   it("serves protected resource metadata", async () => {
     const response = await fetch(`${base}/.well-known/oauth-protected-resource/mcp`);
     expect(response.status).toBe(200);
-    const body = (await response.json()) as { resource: string; authorization_servers: string[] };
+    const body = (await response.json()) as {
+      resource: string;
+      authorization_servers: string[];
+      resource_name: string;
+    };
     expect(body.resource).toBe(`${base}/mcp`);
     expect(body.authorization_servers).toEqual([base]);
+    expect(body.resource_name).toBe("Second Opinion");
   });
 
   it("serves authorization server metadata with PKCE S256", async () => {
@@ -432,6 +437,7 @@ describe("authorization + token flow", () => {
     pageRequest.searchParams.set("code_challenge_method", "S256");
     pageRequest.searchParams.set("resource", `${base}/mcp`);
     const page = await (await fetch(pageRequest)).text();
+    expect(page).toContain("<h1>Second Opinion</h1>");
     expect(page).toContain("workspace currently selected by local Codex on this computer");
     expect(page).not.toContain("requesting access to workspace");
   });

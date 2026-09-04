@@ -29,6 +29,10 @@ describe("connectorAction", () => {
 });
 
 describe("connectorNameFor", () => {
+  it("uses the neutral advisor-facing connector title", () => {
+    expect(DEFAULT_CONNECTOR_NAME).toBe("Second Opinion");
+  });
+
   it("keeps a stored name for the same workspace", () => {
     expect(
       connectorNameFor({
@@ -37,7 +41,7 @@ describe("connectorNameFor", () => {
         previousName: "Codex with ChatGPT",
         hadEndpointBefore: true,
       })
-    ).toBe(DEFAULT_CONNECTOR_NAME);
+    ).toBe("Codex with ChatGPT");
   });
 
   it("keeps the legacy title when this workspace was used before the name field existed", () => {
@@ -56,6 +60,18 @@ describe("connectorNameFor", () => {
         workspaceName: "Landing",
         workspaceId: "def456def456",
         hadEndpointBefore: false,
+      })
+    ).toBe(DEFAULT_CONNECTOR_NAME);
+  });
+
+  it("uses the current title when replacing an endpoint", () => {
+    expect(
+      connectorNameFor({
+        workspaceName: "EchoMind",
+        workspaceId: "abc123abc123",
+        previousName: "Codex with ChatGPT",
+        hadEndpointBefore: true,
+        replacingEndpoint: true,
       })
     ).toBe(DEFAULT_CONNECTOR_NAME);
   });

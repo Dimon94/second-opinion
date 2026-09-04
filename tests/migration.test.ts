@@ -155,7 +155,7 @@ describe("legacy global-state migration", () => {
     expect(readLastEndpoint("another-workspace")).toMatchObject({
       workspaceId: "global",
       publicUrl: "https://c2c-demo.example.com",
-      connectorName: "Codex with ChatGPT",
+      connectorName: "Codex with ChatGPT · Demo",
     });
     expect(readTunnelState("another-workspace")).toMatchObject({
       workspaceId: "global",
@@ -164,7 +164,7 @@ describe("legacy global-state migration", () => {
     });
     expect(readSession("legacy-workspace")).toMatchObject({
       url: "https://chatgpt.com/c/legacy-chat",
-      connectorName: "Codex with ChatGPT",
+      connectorName: "Codex with ChatGPT · Demo",
     });
     expect(JSON.parse(fs.readFileSync(path.join(stateDir, "auth", "store.json"), "utf8"))).toMatchObject({
       version: 2,

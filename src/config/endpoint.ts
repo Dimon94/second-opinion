@@ -7,7 +7,7 @@ export const CHATGPT_PLUGINS_URL = "https://chatgpt.com/plugins";
 export const CHATGPT_CREATE_CONNECTOR_URL =
   "https://chatgpt.com/plugins#settings/Connectors?create-connector=true&redirectAfter=%2Fplugins";
 
-export const DEFAULT_CONNECTOR_NAME = "Codex with ChatGPT";
+export const DEFAULT_CONNECTOR_NAME = "Second Opinion";
 const GLOBAL_CONNECTION_ID = "global";
 
 export interface LastEndpoint {
@@ -31,7 +31,7 @@ export function writeLastEndpoint(endpoint: Omit<LastEndpoint, "savedAt">): Last
   const saved: LastEndpoint = {
     ...endpoint,
     workspaceId: GLOBAL_CONNECTION_ID,
-    connectorName: DEFAULT_CONNECTOR_NAME,
+    connectorName: endpoint.connectorName?.trim() || DEFAULT_CONNECTOR_NAME,
     savedAt: new Date().toISOString(),
   };
   writeSecureJson(endpointFile(saved.workspaceId), saved);
@@ -72,15 +72,18 @@ export function sanitizeConnectorLabel(name: string, workspaceId: string): strin
 }
 
 /**
- * Every workspace uses the one stable machine-global connector title.
+ * Preserve the title of a connector that still points at the active endpoint.
+ * First creation and explicit endpoint replacement use the current default.
  */
 export function connectorNameFor(opts: {
   workspaceName: string;
   workspaceId: string;
   previousName?: string | null;
   hadEndpointBefore: boolean;
+  replacingEndpoint?: boolean;
 }): string {
-  void opts;
+  const previousName = opts.previousName?.trim();
+  if (opts.hadEndpointBefore && !opts.replacingEndpoint && previousName) return previousName;
   return DEFAULT_CONNECTOR_NAME;
 }
 

@@ -70,9 +70,15 @@ Ready.
 
 ### 可选的固定域名
 
-默认公网地址是临时的，桥重启后会变。Codex 会删掉这个项目的 ChatGPT 插件再按新地址加回去。
+ChatGPT Connector 的名称是 **Second Opinion**。长期使用推荐 Cloudflare Named
+Tunnel，因为固定域名在 Bridge 或 Tunnel 重启后仍然不变。Quick Tunnel 是无需域名
+的备用方案；它重启后 URL 会变化，需要删除并重新创建 Connector。
 
-如果你有 Cloudflare 账号，并且域名已经加在 Cloudflare 上，首次配置时（老用户则在下一次编码时问一次）会问你要不要用固定域名，例如 `c2c-<项目>.你的域名`。选是的话，浏览器里授权一次 Cloudflare 即可。之后重启一般不用再改插件。没有账号、不想用、登录失败：继续用临时地址，功能一样，只是修复更慢。
+如果你有 Cloudflare 账号，并且域名已经加在 Cloudflare 上，首次配置时（老用户则
+在下一次编码时问一次）会问你要不要用固定域名，例如
+`advisor.你的域名`。浏览器里授权一次 Cloudflare 后，Second Opinion 可跨重启复用，
+不用再次配对或 OAuth。没有域名时继续使用 Quick Tunnel；只读能力相同，但 URL
+轮换后必须重建 Connector。
 
 凭证放在系统目录，不进项目。
 
@@ -90,7 +96,7 @@ Ready.
              ┌─────────────────────┐
              │      C2C Bridge     │   仅监听本机回环地址
              │  只读 MCP           │   OAuth 2.1 + 一次性配对码
-             │  OAuth + 配对       │   Cloudflare Quick Tunnel
+             │  OAuth + 配对       │   Cloudflare Named / Quick Tunnel
              │  Tunnel 管理        │
              └──────────┬──────────┘
                         │  只读
@@ -115,8 +121,8 @@ Ready.
 
 - **从构造上只读**：服务端根本不存在写文件/删除/Shell/提交类工具，任何提示
   注入都无法启用它们。
-- **一个工作区 = 一道边界**：每个令牌绑定单一工作区；路径校验基于规范化
-  realpath（symlink、`../`、绝对路径逃逸全部被拦截并有测试覆盖）。
+- **当前工作区就是数据边界**：一份机器级授权跟随本机 Codex 当前选择的规范工作区；
+  远程 OAuth/MCP 请求不能切换工作区。路径校验仍会拦截 symlink、`../` 和绝对路径逃逸。
 - **敏感文件永不外泄**：`.env*`、密钥、SSH、各类凭据默认拒绝
   （`.env.example` 放行）；`.c2cignore` 可追加自定义规则。
 - **知道 URL 不等于有权限**：公网 MCP 端点强制 OAuth 2.1（PKCE S256、动态
@@ -131,7 +137,7 @@ Ready.
 ```bash
 pnpm install
 pnpm build          # 产出 dist/，暴露 c2c 命令
-pnpm test           # vitest：146 个测试（路径安全、OAuth、配对、MCP 端到端）
+pnpm test           # vitest（路径安全、OAuth、配对、MCP 端到端）
 
 c2c setup           # 一条命令：Bridge + 隧道 + 配对码
 c2c sandbox-allow   # 把本地设置目录加入 Codex 沙箱白名单（macOS / Windows）
@@ -142,7 +148,8 @@ c2c status / doctor / pair / unpair / logs / stop
 （自动检测，Skill 会替你安装）。
 
 文档：[架构](docs/architecture.md) · [协议](docs/protocol.md) ·
-[安全](docs/security.md) · [故障排查](docs/troubleshooting.md)
+[安全](docs/security.md) · [故障排查](docs/troubleshooting.md) ·
+[恢复烟测](docs/recovery-smoke.md)
 
 ## 目录结构
 

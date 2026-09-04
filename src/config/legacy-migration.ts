@@ -10,12 +10,7 @@ import {
 } from "../auth/store.js";
 import { mergeSession, readSession, writeSession } from "../session/state.js";
 import { writeTunnelState, type TunnelState } from "../tunnel/state.js";
-import {
-  DEFAULT_CONNECTOR_NAME,
-  mcpUrlFromPublic,
-  writeLastEndpoint,
-  type LastEndpoint,
-} from "./endpoint.js";
+import { mcpUrlFromPublic, writeLastEndpoint, type LastEndpoint } from "./endpoint.js";
 import {
   ensureDir,
   getStateDir,
@@ -375,7 +370,7 @@ export function migrateLegacyState(): LegacyMigrationResult {
     })),
   });
   if (session && session.connectorName === endpoint.connectorName) {
-    writeSession(workspaceId, mergeSession(session, { connectorName: DEFAULT_CONNECTOR_NAME }));
+    writeSession(workspaceId, mergeSession(session, {}));
   }
   const result: LegacyMigrationResult = {
     version: LEGACY_MIGRATION_VERSION,

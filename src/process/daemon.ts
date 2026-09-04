@@ -34,20 +34,29 @@ export async function ensureBridge(workspaceRoot: string, opts: { port?: number 
   const workspace = new Workspace(workspaceRoot);
   const observation = await findBridgeObservation(workspace.id);
   if (observation.state === "healthy") {
-    if (
-      observation.runtime.workspaceId === workspace.id &&
-      observation.runtime.workspaceRoot === workspace.root
-    ) {
-      return { runtime: observation.runtime, spawned: false, activated: false };
+    if (await bridgeSupportsRecovery(observation.runtime)) {
+      if (
+        observation.runtime.workspaceId === workspace.id &&
+        observation.runtime.workspaceRoot === workspace.root
+      ) {
+        return { runtime: observation.runtime, spawned: false, activated: false };
+      }
+      await adminFetch(observation.runtime, "POST", "/admin/workspace", 60_000, {
+        workspaceRoot: workspace.root,
+      });
+      const runtime = readRuntimeState();
+      if (!runtime || runtime.workspaceId !== workspace.id || runtime.workspaceRoot !== workspace.root) {
+        throw new Error("Bridge did not activate the requested workspace.");
+      }
+      return { runtime, spawned: false, activated: true };
     }
-    await adminFetch(observation.runtime, "POST", "/admin/workspace", 60_000, {
-      workspaceRoot: workspace.root,
-    });
-    const runtime = readRuntimeState();
-    if (!runtime || runtime.workspaceId !== workspace.id || runtime.workspaceRoot !== workspace.root) {
-      throw new Error("Bridge did not activate the requested workspace.");
+    if (!(await stopBridge(workspaceRoot))) throw new Error("Unable to replace an incompatible Bridge.");
+    const shutdownDeadline = Date.now() + 5000;
+    while (await probeBridge(observation.runtime.port, 100)) {
+      if (Date.now() >= shutdownDeadline) throw new Error("Incompatible Bridge did not stop.");
+      await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    return { runtime, spawned: false, activated: true };
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
   if (observation.state === "unknown") {
     throw new Error(
@@ -91,6 +100,11 @@ export async function ensureBridge(workspaceRoot: string, opts: { port?: number 
     }
   }
   throw new Error(`Bridge did not become healthy within 20s. See ${logFile}`);
+}
+
+export async function bridgeSupportsRecovery(runtime: RuntimeState): Promise<boolean> {
+  const info = await adminFetch<Record<string, unknown>>(runtime, "GET", "/admin/info");
+  return (info.capabilities as { authReload?: unknown } | undefined)?.authReload === true;
 }
 
 export async function adminFetch<T = unknown>(

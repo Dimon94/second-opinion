@@ -1,6 +1,7 @@
 import type { ConversationView } from "../session/state.js";
 import type { AuthorizationStatus } from "../auth/store.js";
 import type { LegacyMigrationResult } from "../config/legacy-migration.js";
+import { DEFAULT_CONNECTOR_NAME } from "../config/endpoint.js";
 
 export const DOCTOR_CONTRACT_VERSION = 1 as const;
 
@@ -180,7 +181,7 @@ export function createRecoveryLeaseDoctorResult(
     chatgptRepair: {
       needed: false,
       connectorAction: "none",
-      connectorName: "Codex with ChatGPT",
+      connectorName: DEFAULT_CONNECTOR_NAME,
       mcpUrl: null,
       previousMcpUrl: null,
       pages,

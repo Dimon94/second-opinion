@@ -13,7 +13,7 @@ import {
 } from "./store.js";
 import { PairingManager } from "../pairing/manager.js";
 import type { Logger } from "../logger/index.js";
-import { PRODUCT_NAME } from "../version.js";
+import { DEFAULT_CONNECTOR_NAME } from "../config/endpoint.js";
 import { escapeHtml, setAuthSecurityHeaders } from "./html.js";
 
 export interface OAuthDeps {
@@ -72,7 +72,7 @@ function protectedResourceMetadata(identity: CanonicalOAuthIdentity): Record<str
     authorization_servers: [identity.issuer],
     scopes_supported: [...SUPPORTED_SCOPES],
     bearer_methods_supported: ["header"],
-    resource_name: PRODUCT_NAME,
+    resource_name: DEFAULT_CONNECTOR_NAME,
   };
 }
 
@@ -95,7 +95,7 @@ function pairingPage(opts: {
   const errorHtml = opts.error
     ? `<p class="error" role="alert">${escapeHtml(opts.error)}</p>`
     : "";
-  const escapedProductName = escapeHtml(PRODUCT_NAME);
+  const escapedProductName = escapeHtml(DEFAULT_CONNECTOR_NAME);
   const escapedWorkspaceName = escapeHtml(opts.workspaceName);
   const escapedRequestId = escapeHtml(opts.requestId);
   return `<!doctype html>

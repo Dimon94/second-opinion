@@ -129,16 +129,18 @@ style until you ask to switch.
 
 ### Optional stable hostname
 
-The default public address is a temporary Cloudflare URL. It changes when the
-bridge restarts, and Codex repairs ChatGPT by deleting the machine-global
-connector and adding it again.
+The ChatGPT connector is named **Second Opinion**. A Cloudflare Named Tunnel is
+the recommended long-running setup because its hostname survives Bridge and
+Tunnel restarts. A Quick Tunnel remains the no-domain fallback; its temporary
+URL changes after a restart, so Codex must delete and recreate the connector.
 
 If you have a Cloudflare account and a domain already on Cloudflare, first-time
 setup (and the next coding session, once) will ask whether you want a stable
-hostname such as `c2c-bridge.your-domain.com`. That path opens a browser so
-you can authorize Cloudflare. After that, the ChatGPT connector keeps working
-across restarts. If you skip it, or the login fails, Codex stays on the temporary
-address — same features, just a slower repair.
+hostname such as `advisor.your-domain.com`. That path opens a browser so you
+can authorize Cloudflare. After that, Second Opinion keeps working across
+restarts without another pairing or OAuth flow. If you skip it, Quick Tunnel
+provides the same read-only tools but requires connector replacement whenever
+its URL rotates.
 
 Credentials stay in the OS app state directory, not in the project.
 
@@ -156,7 +158,7 @@ Credentials stay in the OS app state directory, not in the project.
              ┌─────────────────────┐
              │      C2C Bridge     │   loopback-only HTTP server
              │  read-only MCP      │   OAuth 2.1 + one-time pairing code
-             │  OAuth + Pairing    │   Cloudflare Quick Tunnel
+             │  OAuth + Pairing    │   Cloudflare Named / Quick Tunnel
              │  Tunnel Manager     │
              └──────────┬──────────┘
                         │  read-only
@@ -182,9 +184,10 @@ Credentials stay in the OS app state directory, not in the project.
 
 - **Read-only by construction**: write/delete/shell/commit tools simply do not
   exist on the server. No prompt injection can enable them.
-- **One workspace = one boundary**: every token is bound to a single workspace;
-  path containment uses canonical realpaths (symlink/`../`/absolute-path escapes
-  are all blocked and tested).
+- **The active workspace is the boundary**: one machine-global grant follows
+  the canonical workspace selected locally by Codex. Remote OAuth/MCP requests
+  cannot choose another workspace; path containment blocks symlink, `../`, and
+  absolute-path escapes.
 - **Sensitive files never leave**: `.env*`, keys, SSH, credentials are denied by
   default (`.env.example` allowed); `.c2cignore` adds your own rules.
 - **Knowing the URL grants nothing**: the public MCP endpoint requires OAuth 2.1
@@ -201,7 +204,7 @@ Full threat model: [docs/security.md](docs/security.md)
 ```bash
 pnpm install
 pnpm build          # -> dist/, exposes the `c2c` bin
-pnpm test           # vitest: 146 tests (path security, OAuth, pairing, MCP e2e)
+pnpm test           # vitest (path security, OAuth, pairing, MCP e2e)
 
 c2c setup           # bridge + tunnel + pairing code, all in one
 c2c sandbox-allow   # whitelist the settings dir in Codex (macOS + Windows)
@@ -212,7 +215,8 @@ Requirements: Node.js >= 20, git. `cloudflared` for the public connection
 (auto-detected; the Skill installs it for you).
 
 Docs: [architecture](docs/architecture.md) · [protocol](docs/protocol.md) ·
-[security](docs/security.md) · [troubleshooting](docs/troubleshooting.md)
+[security](docs/security.md) · [troubleshooting](docs/troubleshooting.md) ·
+[recovery smoke](docs/recovery-smoke.md)
 
 ## Project layout
 

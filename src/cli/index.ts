@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { startBridge } from "../bridge/server.js";
 import { findBridgeObservation, findLiveBridge, type RuntimeState } from "../bridge/runtime.js";
-import { adminFetch, ensureBridge, stopBridge } from "../process/daemon.js";
+import { adminFetch, bridgeSupportsRecovery, ensureBridge, stopBridge } from "../process/daemon.js";
 import { Workspace } from "../workspace/manager.js";
 import { AuthStore, type AuthorizationStatus } from "../auth/store.js";
 import { detectTunnelBinaries } from "../tunnel/detect.js";
@@ -38,6 +38,7 @@ import {
   CHATGPT_CREATE_CONNECTOR_URL,
   CHATGPT_DEVELOPER_MODE_URL,
   CHATGPT_PLUGINS_URL,
+  DEFAULT_CONNECTOR_NAME,
   connectorAction,
   connectorNameFor,
   endpointFingerprint,
@@ -179,6 +180,7 @@ function persistWorkspaceEndpoint(opts: {
     workspaceId: opts.workspaceId,
     previousName: previous?.connectorName,
     hadEndpointBefore: Boolean(previous),
+    replacingEndpoint: connectorAction(previous?.mcpUrl, opts.mcpUrl) === "update",
   });
   writeLastEndpoint({
     workspaceId: opts.workspaceId,
@@ -486,9 +488,18 @@ program
         ? await findBridgeObservation()
         : null;
       if (bridgeBeforeMigration?.state !== "unknown") {
+        let bridgeForReload = bridgeBeforeMigration?.state === "healthy"
+          ? bridgeBeforeMigration.runtime
+          : null;
+        if (bridgeForReload && !(await bridgeSupportsRecovery(bridgeForReload))) {
+          const ensured = await ensureBridge(root);
+          bridgeForReload = ensured.runtime;
+          if (ensured.spawned) results.push("已自动启动 Bridge");
+          else if (ensured.activated) results.push("已激活目标 Workspace");
+        }
         migration = migrateLegacyState();
-        if (migration.status !== "not_needed" && bridgeBeforeMigration?.state === "healthy") {
-          await adminFetch(bridgeBeforeMigration.runtime, "POST", "/admin/auth/reload");
+        if (migration.status !== "not_needed" && bridgeForReload) {
+          await adminFetch(bridgeForReload, "POST", "/admin/auth/reload");
         }
         if (migration.status !== "not_needed") acknowledgeLegacyRuntimeReload();
         if (migration.status === "migrated") results.push("已保守迁移旧连接状态");
@@ -591,7 +602,7 @@ program
           previousName: lastEndpoint?.connectorName,
           hadEndpointBefore: Boolean(lastEndpoint),
         })
-      : "Codex with ChatGPT";
+      : DEFAULT_CONNECTOR_NAME;
     const tunnelState = workspace ? readTunnelState(workspace.id) : null;
     const namedReady = tunnelState ? isNamedTunnelReady(tunnelState) : false;
     let namedRepair: DoctorNamedRepair = { needed: false };
