@@ -646,6 +646,112 @@ describe("c2c doctor contract", () => {
     ).toMatchObject({ pairingActive: false });
   });
 
+  it("advances recoverable access expiry through a real refresh-capable conversation action", async () => {
+    const fixture = isolatedWorkspace("doctor-oauth-access-expired");
+    dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+    process.env.C2C_STATE_DIR = fixture.stateDir;
+    const first = await startBridge({
+      workspaceRoot: fixture.workspace,
+      port: 0,
+      persistRuntime: true,
+      tunnelProvider: new FixtureTunnel("fixture-named", (port) => `http://127.0.0.1:${port}`),
+    });
+    bridges.push(first);
+    const started = await startFixtureTunnel(readRuntimeState()!);
+    const client = first.authStore.registerClient({
+      clientName: "recoverable-chatgpt-client",
+      redirectUris: ["https://chatgpt.com/oauth/callback"],
+      baseUrl: started.url,
+    });
+    const tokens = first.authStore.issueTokens({
+      identity: first.authStore.identityForClient(
+        started.url,
+        client.clientId,
+        ["workspace.read", "offline_access"]
+      )!,
+    });
+    const conversationUrl = "https://chatgpt.com/c/recoverable-expiry";
+    writeLastEndpoint({
+      workspaceId: first.workspace.id,
+      port: first.port,
+      publicUrl: started.url,
+      mcpUrl: `${started.url}/mcp`,
+      connectorName: "Codex with ChatGPT",
+    });
+    writeSession(first.workspace.id, {
+      url: conversationUrl,
+      conversationMode: "long-chat",
+      connectorName: "Codex with ChatGPT",
+      savedAt: new Date().toISOString(),
+    });
+    await first.close();
+
+    const storeFile = path.join(fixture.stateDir, "auth", "store.json");
+    const persisted = JSON.parse(fs.readFileSync(storeFile, "utf8")) as {
+      clients: Array<{ grant: { accessExpiresAt: number } }>;
+    };
+    persisted.clients[0].grant.accessExpiresAt = 0;
+    fs.writeFileSync(storeFile, JSON.stringify(persisted));
+
+    const restarted = await startBridge({
+      workspaceRoot: fixture.workspace,
+      port: first.port,
+      persistRuntime: true,
+      tunnelProvider: new FixtureTunnel("fixture-named", (port) => `http://127.0.0.1:${port}`),
+    });
+    bridges.push(restarted);
+    await startFixtureTunnel(readRuntimeState()!);
+
+    const expired = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
+    expect(expired.status).toBe(1);
+    expect(parseResult(expired.stdout)).toMatchObject({
+      outcome: "unknown",
+      reason: "auth_refresh_required",
+      authorization: {
+        state: "expired",
+        recoverable: true,
+      },
+      nextAction: {
+        type: "open_conversation",
+        reason: "auth_refresh_required",
+        page: conversationUrl,
+      },
+    });
+    expect(
+      await adminFetch<{ pairingActive: boolean }>(readRuntimeState()!, "GET", "/admin/info")
+    ).toMatchObject({ pairingActive: false });
+
+    const refreshed = await fetch(`${started.url}/oauth/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: tokens.refreshToken!,
+        client_id: client.clientId,
+        resource: `${started.url}/mcp`,
+      }),
+    });
+    expect(refreshed.status).toBe(200);
+    const refreshedTokens = await refreshed.json() as {
+      access_token: string;
+      refresh_token: string;
+    };
+    const persistedAfterRefresh = fs.readFileSync(storeFile, "utf8");
+    expect(persistedAfterRefresh).not.toContain(refreshedTokens.access_token);
+    expect(persistedAfterRefresh).not.toContain(refreshedTokens.refresh_token);
+
+    const healthy = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
+    expect(healthy.status).toBe(0);
+    expect(parseResult(healthy.stdout)).toMatchObject({
+      outcome: expect.stringMatching(/^(healthy|repaired)$/),
+      authorization: {
+        state: "healthy",
+        proof: "refresh",
+      },
+      nextAction: { type: "open_conversation", page: conversationUrl },
+    });
+  });
+
   it.each([
     "unpair",
     "revoked",
@@ -655,7 +761,6 @@ describe("c2c doctor contract", () => {
     "scope_mismatch",
     "identity_mismatch",
     "unverified",
-    "access_expired",
   ] as const)(
     "classifies a %s persisted grant without guessing",
     async (failure) => {
@@ -716,9 +821,6 @@ describe("c2c doctor contract", () => {
           persisted.clients[0].grant!.accessExpiresAt = 0;
           persisted.clients[0].grant!.refreshExpiresAt = 0;
         }
-        else if (failure === "access_expired") {
-          persisted.clients[0].grant!.accessExpiresAt = 0;
-        }
         else if (failure === "unverified") {
           delete persisted.clients[0].grant;
         }
@@ -743,7 +845,7 @@ describe("c2c doctor contract", () => {
       await startFixtureTunnel(readRuntimeState()!);
 
       const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
-      const retry = failure === "unverified" || failure === "access_expired";
+      const retry = failure === "unverified";
       expect(result.status).toBe(retry ? 1 : 2);
       expect(parseResult(result.stdout)).toMatchObject({
         outcome: retry ? "unknown" : "user_action_required",
@@ -755,8 +857,6 @@ describe("c2c doctor contract", () => {
         authorization: {
           state: failure === "scope_mismatch" || failure === "identity_mismatch"
             ? "identity_mismatch"
-            : failure === "access_expired"
-              ? "expired"
             : failure === "unpair"
               ? "revoked"
             : failure === "lost"

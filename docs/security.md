@@ -50,10 +50,12 @@ Codex. Remote OAuth or MCP requests cannot choose a root or broaden read-only
 scopes; each routed request also needs its matching task/session binding token.
 Doctor reuses a grant only when that exact binding still matches and the store
 has a successful protected-resource or refresh result. Authorization-code-only
-state and access expiry remain unverified until a real protected call or refresh;
-they request a safe retry, not a new pairing, while the rotating refresh grant
-remains valid. Explicit token revocation revokes the client grant. An unreachable
-probe stays unknown and never creates a pairing session or masquerades as revocation.
+state requests a safe retry without creating a new pairing. Recoverable access
+expiry returns the existing conversation action so ChatGPT's OAuth client makes
+a real protected call or refresh with its in-memory credential. Explicit token
+revocation revokes only that client grant; explicit unpair remains machine-global.
+An unreachable probe stays unknown and never creates a pairing session or
+masquerades as revocation.
 
 ## Storage
 

@@ -4,6 +4,7 @@ import path from "node:path";
 import {
   ensureDir,
   getStateDir,
+  legacyMigrationClientRevocationsFile,
   legacyMigrationRevocationFile,
   readJsonIfExists,
   writeSecureJson,
@@ -163,6 +164,11 @@ interface PersistedAuthState {
   tokens: TokenRecord[];
 }
 
+interface PersistedClientRevocations {
+  version: 1;
+  clientIds: string[];
+}
+
 export type VerifyTokenResult =
   | { ok: true; record: TokenRecord }
   | {
@@ -180,6 +186,39 @@ function sha256hex(value: string): string {
 
 function newToken(prefix: string): string {
   return `${prefix}_${randomBytes(32).toString("base64url")}`;
+}
+
+function clientRevocations(): Set<string> {
+  const persisted = readJsonIfExists<PersistedClientRevocations>(
+    legacyMigrationClientRevocationsFile()
+  );
+  return new Set(
+    persisted?.version === 1 && Array.isArray(persisted.clientIds)
+      ? persisted.clientIds.filter((clientId) => typeof clientId === "string")
+      : []
+  );
+}
+
+function markClientRevoked(clientId: string): void {
+  const revoked = clientRevocations();
+  revoked.add(clientId);
+  writeSecureJson(legacyMigrationClientRevocationsFile(), {
+    version: 1,
+    clientIds: [...revoked],
+  });
+}
+
+function clearClientRevocation(clientId: string): void {
+  const revoked = clientRevocations();
+  if (!revoked.delete(clientId)) return;
+  if (revoked.size === 0) {
+    fs.rmSync(legacyMigrationClientRevocationsFile(), { force: true });
+    return;
+  }
+  writeSecureJson(legacyMigrationClientRevocationsFile(), {
+    version: 1,
+    clientIds: [...revoked],
+  });
 }
 
 export function base64UrlSha256(value: string): string {
@@ -230,15 +269,18 @@ export class AuthStore {
     const data = readJsonIfExists<PersistedAuthState>(this.file);
     if (!data || data.version !== 2 || typeof data.bridgeId !== "string") return;
     const migrationRevoked = fs.existsSync(legacyMigrationRevocationFile());
+    const revokedClients = clientRevocations();
     this.bridgeId = data.bridgeId;
     for (const client of data.clients ?? []) {
-      if (migrationRevoked && client.grant) {
+      if ((migrationRevoked || revokedClients.has(client.clientId)) && client.grant) {
         client.grant = { ...client.grant, state: "revoked" };
       }
       this.clients.set(client.clientId, client);
     }
     for (const token of data.tokens ?? []) {
-      if (!migrationRevoked && !token.revoked) this.tokens.set(token.hash, token);
+      if (!migrationRevoked && !revokedClients.has(token.binding.clientId) && !token.revoked) {
+        this.tokens.set(token.hash, token);
+      }
     }
   }
 
@@ -401,6 +443,7 @@ export class AuthStore {
     }
     this.save();
     fs.rmSync(legacyMigrationRevocationFile(), { force: true });
+    clearClientRevocation(input.identity.clientId);
     writeSecureJson(path.join(getStateDir(), "migrations", "legacy-global-v1.json"), {
       version: 1,
       status: "completed",
@@ -476,16 +519,28 @@ export class AuthStore {
   }
 
   revokeToken(token: string): boolean {
+    const tokenHash = sha256hex(token);
+    let record = this.tokens.get(tokenHash);
     if (this.migrationPending) {
-      this.revokeAll();
-      return true;
+      const authDir = path.dirname(this.file);
+      const files = fs.existsSync(authDir)
+        ? fs.readdirSync(authDir).filter((name) => name.endsWith(".json"))
+        : [];
+      for (const name of new Set([path.basename(this.file), ...files])) {
+        const state = readJsonIfExists<PersistedAuthState>(path.join(authDir, name));
+        record =
+          state?.version === 2 && Array.isArray(state.tokens)
+            ? state.tokens.find(
+                (candidate) =>
+                  candidate.hash === tokenHash && typeof candidate.binding?.clientId === "string"
+              )
+            : undefined;
+        if (record) break;
+      }
     }
-    const record = this.tokens.get(sha256hex(token));
     if (!record) return false;
-    writeSecureJson(legacyMigrationRevocationFile(), {
-      version: 1,
-      revokedAt: new Date().toISOString(),
-    });
+    markClientRevoked(record.binding.clientId);
+    if (this.migrationPending) return true;
     const clientId = record.binding.clientId;
     const client = this.clients.get(clientId);
     const grant = client ? this.grantFor(client) : null;

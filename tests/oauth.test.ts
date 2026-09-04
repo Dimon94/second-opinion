@@ -150,6 +150,43 @@ describe("canonical OAuth identity", () => {
 });
 
 describe("persisted grant lifecycle", () => {
+  it("keeps sibling clients valid after revoking one client and reloading", () => {
+    const dir = makeTmpDir("oauth-client-revoke-isolation");
+    const file = path.join(dir, "store.json");
+    try {
+      const store = new AuthStore({ file });
+      const revokedClient = store.registerClient({
+        baseUrl: "https://bridge.example",
+        redirectUris: [REDIRECT_URI],
+      });
+      const revokedIdentity = store.identityForClient(
+        "https://bridge.example",
+        revokedClient.clientId,
+        ["workspace.read", "offline_access"]
+      )!;
+      const revokedTokens = store.issueTokens({ identity: revokedIdentity });
+      const siblingClient = store.registerClient({
+        baseUrl: "https://bridge.example",
+        redirectUris: ["http://127.0.0.1:19998/callback"],
+      });
+      const siblingIdentity = store.identityForClient(
+        "https://bridge.example",
+        siblingClient.clientId,
+        ["workspace.read", "offline_access"]
+      )!;
+      const siblingTokens = store.issueTokens({ identity: siblingIdentity });
+
+      expect(store.revokeToken(revokedTokens.refreshToken!)).toBe(true);
+
+      const reloaded = new AuthStore({ file });
+      expect(reloaded.verifyAccessToken(siblingTokens.accessToken, siblingIdentity)).toMatchObject({
+        ok: true,
+      });
+    } finally {
+      cleanup(dir);
+    }
+  });
+
   it("distinguishes access expiry from refresh expiry and records a real refresh", () => {
     const dir = makeTmpDir("oauth-grant-expiry");
     const now = new Date("2026-01-01T00:00:00.000Z");

@@ -14,6 +14,7 @@ import { mcpUrlFromPublic, writeLastEndpoint, type LastEndpoint } from "./endpoi
 import {
   ensureDir,
   getStateDir,
+  legacyMigrationClientRevocationsFile,
   legacyMigrationRevocationFile,
   readJsonIfExists,
   writeSecureJson,
@@ -74,6 +75,17 @@ function jsonFiles(dir: string, excluded: string): string[] {
 
 function consent(reason: LegacyMigrationResult["reason"]): LegacyMigrationResult {
   return { version: LEGACY_MIGRATION_VERSION, status: "consent_required", reason };
+}
+
+function migrationClientRevoked(clientId: string): boolean {
+  const persisted = readJsonIfExists<{ version: number; clientIds: unknown }>(
+    legacyMigrationClientRevocationsFile()
+  );
+  return (
+    persisted?.version === 1 &&
+    Array.isArray(persisted.clientIds) &&
+    persisted.clientIds.includes(clientId)
+  );
 }
 
 export function hasLegacyStateToMigrate(): boolean {
@@ -260,7 +272,12 @@ export function migrateLegacyState(): LegacyMigrationResult {
   const tunnel = readJsonIfExists<TunnelState>(
     path.join(stateDir, "tunnels", `${workspaceId}.json`)
   );
-  if (Array.isArray(auth?.clients) && auth.clients.some((client) => client.grant?.state === "revoked")) {
+  if (
+    Array.isArray(auth?.clients) &&
+    auth.clients.some(
+      (client) => client.grant?.state === "revoked" || migrationClientRevoked(client.clientId)
+    )
+  ) {
     return requireConsent("revoked", Boolean(canonicalAuth));
   }
   if (
@@ -382,7 +399,10 @@ export function migrateLegacyState(): LegacyMigrationResult {
     status: "migrated",
     reason: "exact_match",
   };
-  if (fs.existsSync(legacyMigrationRevocationFile())) {
+  if (
+    fs.existsSync(legacyMigrationRevocationFile()) ||
+    migrationClientRevoked(client.clientId)
+  ) {
     fs.rmSync(authStoreFile, { force: true });
     return complete(consent("revoked"));
   }

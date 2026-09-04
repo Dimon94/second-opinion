@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   AuthStore,
@@ -350,6 +351,32 @@ describe("legacy global-state migration", () => {
     expect(new AuthStore().authorizationStatus("https://c2c-demo.example.com").state).toBe(
       "missing"
     );
+  });
+
+  it("keeps a client token revocation effective while a partial migration is pending", () => {
+    const stateDir = isolateStateDir();
+    dirs.push(stateDir);
+    exactLegacyFixture(stateDir);
+    const refreshToken = "pending-migration-refresh-token";
+    const legacyAuthFile = path.join(stateDir, "auth", "legacy-workspace.json");
+    const legacy = JSON.parse(fs.readFileSync(legacyAuthFile, "utf8")) as {
+      tokens: Array<{ hash: string; kind: string }>;
+    };
+    legacy.tokens[0].hash = createHash("sha256").update(refreshToken).digest("hex");
+    legacy.tokens[0].kind = "refresh";
+    writeSecureJson(legacyAuthFile, legacy);
+    writeSecureJson(path.join(stateDir, "migrations", "legacy-global-v1.json"), {
+      version: 1,
+      status: "pending",
+    });
+
+    expect(new AuthStore().revokeToken(refreshToken)).toBe(true);
+    expect(fs.existsSync(legacyMigrationRevocationFile())).toBe(false);
+    expect(migrateLegacyState()).toEqual({
+      version: 1,
+      status: "consent_required",
+      reason: "revoked",
+    });
   });
 
   it("lets concurrent revocation win over a completed active migration", () => {

@@ -22,6 +22,7 @@ export type DoctorReason =
   | "endpoint_changed"
   | "connector_missing"
   | "auth_required"
+  | "auth_refresh_required"
   | "invalid_client"
   | "workspace_denied"
   | "conversation_missing"
@@ -278,6 +279,20 @@ export function createDoctorResult(input: {
     };
   }
   const authorization = authorizationDisposition(input.authorization);
+  if (input.authorization.state === "expired" && input.authorization.recoverable) {
+    const conversation = input.conversation;
+    const page = conversation?.mode === "project" ? conversation.projectUrl : conversation?.chatUrl;
+    return {
+      ...base,
+      outcome: "unknown",
+      reason: "auth_refresh_required",
+      safeRetry: true,
+      nextAction: page
+        ? { type: "open_conversation", reason: "auth_refresh_required", page }
+        : { type: "create_conversation", reason: "conversation_missing" },
+      conversation,
+    };
+  }
   if (authorization === "retry") {
     return {
       ...base,
