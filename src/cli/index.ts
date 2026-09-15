@@ -265,7 +265,7 @@ async function ensureBridgeAndTunnel(
 ): Promise<{ runtime: RuntimeState; info: AdminInfo; mcpUrl: string | null }> {
   const { runtime } = await ensureBridge(workspaceRoot);
   let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-  let mcpUrl: string | null = info.publicUrl ? `${info.publicUrl}/mcp` : null;
+  let mcpUrl = mcpUrlFromPublic(info.publicUrl);
   if (opts.tunnel && !info.publicUrl) {
     const binaries = detectTunnelBinaries();
     if (!binaries.cloudflared) {
@@ -276,7 +276,7 @@ async function ensureBridgeAndTunnel(
     const result = await adminFetch<TunnelStartResponse>(runtime, "POST", "/admin/tunnel/start", 90_000);
     if (!result.url) throw new Error(result.message ?? "Tunnel start failed");
     info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-    mcpUrl = `${result.url}/mcp`;
+    mcpUrl = mcpUrlFromPublic(result.url);
   }
   return { runtime, info, mcpUrl };
 }
@@ -457,7 +457,7 @@ program
     say("");
     check(`Workspace：${info.workspaceName}`);
     check(`Bridge：运行中（端口 ${info.port}）`);
-    if (info.tunnel.running && info.tunnel.url) check(`安全连接：${info.tunnel.url}/mcp`);
+    if (info.tunnel.running && info.tunnel.url) check(`安全连接：${mcpUrlFromPublic(info.tunnel.url)}`);
     else say("· 安全连接：未启用（本地模式）");
     say(`· 已授权连接：${info.tokenCount > 0 ? "是" : "否"}`);
   });
@@ -630,7 +630,7 @@ program
     // MCP local reachability (401 without token means MCP + auth both work)
     if (runtime) {
       try {
-        const response = await fetch(`http://127.0.0.1:${runtime.port}/mcp`, {
+        const response = await fetch(`http://127.0.0.1:${runtime.port}/mcp/session`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ jsonrpc: "2.0", method: "ping", id: 1 }),

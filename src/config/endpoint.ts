@@ -49,8 +49,8 @@ export function endpointFingerprint(url: string | null | undefined): string | nu
 
 export function mcpUrlFromPublic(publicUrl: string | null | undefined): string | null {
   if (!publicUrl) return null;
-  const base = normalizePublicUrl(publicUrl).replace(/\/mcp$/, "");
-  return `${base}/mcp`;
+  const base = normalizePublicUrl(publicUrl).replace(/\/mcp(?:\/session)?$/, "");
+  return `${base}/mcp/session`;
 }
 
 /** What the Skill should do to the machine-global ChatGPT connector.

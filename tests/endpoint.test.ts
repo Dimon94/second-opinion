@@ -78,9 +78,10 @@ describe("connectorNameFor", () => {
 });
 
 describe("mcpUrlFromPublic", () => {
-  it("appends /mcp and folds case/slash variants", () => {
-    expect(mcpUrlFromPublic("https://A.trycloudflare.com/")).toBe("https://a.trycloudflare.com/mcp");
-    expect(mcpUrlFromPublic("https://a.trycloudflare.com/mcp")).toBe("https://a.trycloudflare.com/mcp");
+  it("appends the session-routed MCP path and folds legacy/current variants", () => {
+    expect(mcpUrlFromPublic("https://A.trycloudflare.com/")).toBe("https://a.trycloudflare.com/mcp/session");
+    expect(mcpUrlFromPublic("https://a.trycloudflare.com/mcp")).toBe("https://a.trycloudflare.com/mcp/session");
+    expect(mcpUrlFromPublic("https://a.trycloudflare.com/mcp/session")).toBe("https://a.trycloudflare.com/mcp/session");
     expect(normalizePublicUrl("https://A.trycloudflare.com/")).toBe("https://a.trycloudflare.com");
   });
 });

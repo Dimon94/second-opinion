@@ -416,7 +416,7 @@ describe("c2c doctor contract", () => {
         type: "replace_connector",
         reason: "connector_missing",
         connectorName: expect.any(String),
-        endpoint: `${bridge.localBaseUrl()}/mcp`,
+        endpoint: `${bridge.localBaseUrl()}/mcp/session`,
       },
     });
     expect(
@@ -601,7 +601,7 @@ describe("c2c doctor contract", () => {
       workspaceId: first.workspace.id,
       port: first.port,
       publicUrl: started.url,
-      mcpUrl: `${started.url}/mcp`,
+      mcpUrl: `${started.url}/mcp/session`,
       connectorName: "Codex with ChatGPT",
     });
 
@@ -671,7 +671,7 @@ describe("c2c doctor contract", () => {
         workspaceId: first.workspace.id,
         port: first.port,
         publicUrl: started.url,
-        mcpUrl: `${started.url}/mcp`,
+        mcpUrl: `${started.url}/mcp/session`,
         connectorName: "Codex with ChatGPT",
       });
       await first.close();
@@ -1227,7 +1227,7 @@ describe("c2c doctor contract", () => {
       workspaceId: workspace.id,
       port: bridge.port,
       publicUrl: bridge.localBaseUrl(),
-      mcpUrl: `${bridge.localBaseUrl()}/mcp`,
+      mcpUrl: `${bridge.localBaseUrl()}/mcp/session`,
       connectorName: "Codex with ChatGPT",
     });
 
@@ -1289,7 +1289,7 @@ describe("c2c doctor contract", () => {
     expect(parseResult(result.stdout)).toMatchObject({
       outcome: "user_action_required",
       reason: "endpoint_changed",
-      nextAction: { type: "replace_connector", endpoint: `${bridge.localBaseUrl()}/mcp` },
+      nextAction: { type: "replace_connector", endpoint: `${bridge.localBaseUrl()}/mcp/session` },
       endpointIdentity: {
         changed: true,
         previousFingerprint: "sha256:0dbfbcb78cb5d5a5",
@@ -1335,7 +1335,7 @@ describe("c2c doctor contract", () => {
       workspaceId: workspace.id,
       port: 48765,
       publicUrl: "https://c2c-demo.example.com",
-      mcpUrl: "https://c2c-demo.example.com/mcp",
+      mcpUrl: "https://c2c-demo.example.com/mcp/session",
       connectorName: "Codex with ChatGPT",
     });
     const tunnel = new FixtureTunnel(
@@ -1431,7 +1431,7 @@ describe("c2c doctor contract", () => {
         workspaceId: workspace.id,
         port: bridge.port,
         publicUrl: "http://127.0.0.1:1",
-        mcpUrl: "http://127.0.0.1:1/mcp",
+        mcpUrl: "http://127.0.0.1:1/mcp/session",
         connectorName: "Codex with ChatGPT",
       });
     }
@@ -1463,7 +1463,7 @@ describe("c2c doctor contract", () => {
       workspaceId: workspace.id,
       port: 1234,
       publicUrl: "https://alice:browser-secret@example.com",
-      mcpUrl: "https://alice:browser-secret@example.com/mcp",
+      mcpUrl: "https://alice:browser-secret@example.com/mcp/session",
       connectorName:
         '/Users/dimon/ABCD-EFGH C:\\Users\\alice\\private Cookie: session="browser-cookie-secret"; Path=/ c2c_rt_refresh_should_never_appear Bearer c2c_at_access_should_never_appear',
       savedAt: new Date().toISOString(),

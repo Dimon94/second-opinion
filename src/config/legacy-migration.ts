@@ -176,6 +176,11 @@ function exactAuth(state: LegacyAuthState, endpoint: LastEndpoint): boolean {
   }
 }
 
+function matchesMcpEndpoint(endpoint: LastEndpoint): boolean {
+  const current = mcpUrlFromPublic(endpoint.publicUrl);
+  return endpoint.mcpUrl === current || endpoint.mcpUrl === current?.replace(/\/session$/, "");
+}
+
 export function migrateLegacyState(): LegacyMigrationResult {
   const stateDir = getStateDir();
   const authStoreFile = path.join(stateDir, "auth", "store.json");
@@ -272,7 +277,7 @@ export function migrateLegacyState(): LegacyMigrationResult {
   }
   if (
     endpoint.workspaceId === workspaceId &&
-    endpoint.mcpUrl === mcpUrlFromPublic(endpoint.publicUrl) &&
+    matchesMcpEndpoint(endpoint) &&
     tunnel.workspaceId === workspaceId &&
     tunnel.preference === "quick"
   ) {
@@ -295,7 +300,7 @@ export function migrateLegacyState(): LegacyMigrationResult {
   }
   if (
     endpoint.workspaceId !== workspaceId ||
-    endpoint.mcpUrl !== mcpUrlFromPublic(endpoint.publicUrl) ||
+    !matchesMcpEndpoint(endpoint) ||
     tunnel.workspaceId !== workspaceId ||
     tunnel.preference !== "named" ||
     typeof tunnel.hostname !== "string" ||

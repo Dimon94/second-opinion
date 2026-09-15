@@ -47,9 +47,9 @@ export function createSessionMcpServer(bindings: WorkspaceBindingStore, logger: 
     "bind_workspace",
     {
       title: "Bind locally authorized workspace",
-      description: "Consume a short-lived local bootstrap and return the bearer token required by session-routed reads.",
+      description: "Consume a short-lived local bootstrap. Keep the returned binding_token private and include it in every later session-routed tool call.",
       inputSchema: { bootstrap_token: z.string().min(1).max(128) },
-      outputSchema: { bindingToken: z.string() },
+      outputSchema: { binding_token: z.string() },
     },
     async (args, extra) => {
       try {

@@ -7,6 +7,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { describe, expect, it } from "vitest";
 import { startBridge, type Bridge } from "../src/bridge/server.js";
+import { mcpUrlFromPublic } from "../src/config/endpoint.js";
 import { cleanup, isolateStateDir, makeGitRepo, makeTmpDir, write } from "./helpers.js";
 
 const execFileAsync = promisify(execFile);
@@ -24,7 +25,7 @@ function issueAccessToken(bridge: Bridge, scopes = ["workspace.read"]): string {
 
 async function sessionClient(bridge: Bridge, accessToken: string): Promise<Client> {
   const client = new Client({ name: "session-routing-test", version: "1.0.0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${bridge.localBaseUrl()}/mcp/session`), {
+  await client.connect(new StreamableHTTPClientTransport(new URL(mcpUrlFromPublic(bridge.localBaseUrl())!), {
     requestInit: { headers: { authorization: `Bearer ${accessToken}` } },
   }));
   return client;
@@ -79,14 +80,14 @@ describe("session-routed MCP entry", () => {
       ]);
       expect(attempts.filter((attempt) => !attempt.isError)).toHaveLength(1);
       expect(attempts.filter((attempt) => attempt.isError)).toHaveLength(1);
-      const boundA = data<{ bindingToken: string }>(attempts.find((attempt) => !attempt.isError)!);
-      expect(boundA.bindingToken).toMatch(/^c2c_bind_/);
+      const boundA = data<{ binding_token: string }>(attempts.find((attempt) => !attempt.isError)!);
+      expect(boundA.binding_token).toMatch(/^c2c_bind_/);
 
       const missing = await call(client, "session-a", "workspace_info", {});
       expect(missing.isError).toBe(true);
       expect(JSON.stringify(missing)).toContain("WORKSPACE_BINDING_REQUIRED");
       const copiedMetadata = await call(client, "session-b", "workspace_info", {
-        binding_token: boundA.bindingToken,
+        binding_token: boundA.binding_token,
       });
       expect(copiedMetadata.isError).toBe(true);
       expect(JSON.stringify(copiedMetadata)).toContain("WORKSPACE_BINDING_MISMATCH");
@@ -94,7 +95,7 @@ describe("session-routed MCP entry", () => {
       const otherToken = issueAccessToken(bridge);
       const otherClient = await sessionClient(bridge, otherToken);
       const copiedToken = await call(otherClient, "session-a", "workspace_info", {
-        binding_token: boundA.bindingToken,
+        binding_token: boundA.binding_token,
       });
       expect(copiedToken.isError).toBe(true);
       expect(JSON.stringify(copiedToken)).toContain("WORKSPACE_BINDING_MISMATCH");
@@ -119,39 +120,44 @@ describe("session-routed MCP entry", () => {
       expect(cliBootstrap.stderr).toBe("");
       const bootstrapB = JSON.parse(cliBootstrap.stdout) as { bootstrapToken: string };
       expect(bridge.workspace.root).toBe(rootA);
-      const boundB = data<{ bindingToken: string }>(await call(client, "session-b", "bind_workspace", {
+      const boundB = data<{ binding_token: string }>(await call(client, "session-b", "bind_workspace", {
         bootstrap_token: bootstrapB.bootstrapToken,
       }));
-      const fileA = data<{ content: string }>(await call(client, "session-a", "read_file", {
-        binding_token: boundA.bindingToken,
-        path: "identity.txt",
-      }));
-      const fileB = data<{ content: string }>(await call(client, "session-b", "read_file", {
-        binding_token: boundB.bindingToken,
-        path: "identity.txt",
-      }));
-      expect([fileA.content, fileB.content]).toEqual(["workspace A", "workspace B"]);
+      const [infoAResult, fileAResult, infoBResult, fileBResult, repeatedAResult, repeatedBResult] = await Promise.all([
+        call(client, "session-a", "workspace_info", { binding_token: boundA.binding_token }),
+        call(client, "session-a", "read_file", { binding_token: boundA.binding_token, path: "identity.txt" }),
+        call(client, "session-b", "workspace_info", { binding_token: boundB.binding_token }),
+        call(client, "session-b", "read_file", { binding_token: boundB.binding_token, path: "identity.txt" }),
+        call(client, "session-a", "read_file", { binding_token: boundA.binding_token, path: "identity.txt" }),
+        call(client, "session-b", "read_file", { binding_token: boundB.binding_token, path: "identity.txt" }),
+      ]);
+      const infoA = data<{ workspaceId: string }>(infoAResult);
+      const infoB = data<{ workspaceId: string }>(infoBResult);
+      expect(infoA.workspaceId).not.toBe(infoB.workspaceId);
+      expect([fileAResult, fileBResult, repeatedAResult, repeatedBResult].map((result) =>
+        data<{ content: string }>(result).content
+      )).toEqual(["workspace A", "workspace B", "workspace A", "workspace B"]);
 
       const outside = await call(client, "session-a", "read_file", {
-        binding_token: boundA.bindingToken, path: "../../etc/hosts",
+        binding_token: boundA.binding_token, path: "../../etc/hosts",
       });
       expect(outside.isError).toBe(true);
       expect(JSON.stringify(outside)).toContain("PATH_OUTSIDE_WORKSPACE");
 
       const unsupported = await call(client, "session-a", "git_status", {
-        binding_token: boundA.bindingToken,
+        binding_token: boundA.binding_token,
       });
       expect(unsupported.isError).toBe(true);
       expect(JSON.stringify(unsupported)).toContain("Tool git_status not found");
 
       const persisted = fs.readFileSync(path.join(stateDir, "bindings", "store.json"), "utf8");
       expect(persisted).not.toContain(bootstrapA.bootstrapToken);
-      expect(persisted).not.toContain(boundA.bindingToken);
+      expect(persisted).not.toContain(boundA.binding_token);
       expect(persisted).toContain(rootA);
 
       expect((await admin("/admin/bindings/unbind", { taskId: "task-a" })).status).toBe(200);
       const unbound = await call(client, "session-a", "workspace_info", {
-        binding_token: boundA.bindingToken,
+        binding_token: boundA.binding_token,
       });
       expect(unbound.isError).toBe(true);
       expect(JSON.stringify(unbound)).toContain("WORKSPACE_BINDING_REQUIRED");
@@ -172,7 +178,7 @@ describe("session-routed MCP entry", () => {
       const replacementToken = issueAccessToken(bridge);
       const replacementClient = await sessionClient(bridge, replacementToken);
       const cannotRevive = await call(replacementClient, "session-b", "workspace_info", {
-        binding_token: boundB.bindingToken,
+        binding_token: boundB.binding_token,
       });
       expect(cannotRevive.isError).toBe(true);
       expect(JSON.stringify(cannotRevive)).toContain("WORKSPACE_BINDING_REQUIRED");

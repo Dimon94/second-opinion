@@ -112,7 +112,7 @@ export class WorkspaceBindingStore {
     return { bootstrapToken, expiresAt };
   }
 
-  redeem(bootstrapToken: string, principal: OAuthPrincipal, sessionId: string): { bindingToken: string } {
+  redeem(bootstrapToken: string, principal: OAuthPrincipal, sessionId: string): { binding_token: string } {
     this.pruneExpired();
     if (!validSecret(bootstrapToken, "c2c_boot")) {
       throw new WorkspaceBindingError("INVALID_BOOTSTRAP", "The workspace bootstrap is invalid or expired.");
@@ -131,7 +131,7 @@ export class WorkspaceBindingStore {
       createdAt: new Date().toISOString(),
     });
     this.save();
-    return { bindingToken };
+    return { binding_token: bindingToken };
   }
 
   resolve(bindingToken: string, principal: OAuthPrincipal, sessionId: string): Workspace {
