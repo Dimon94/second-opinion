@@ -376,6 +376,7 @@ describe("discovery metadata", () => {
     expect(body.resource).toBe(`${base}/mcp`);
     expect(body.authorization_servers).toEqual([base]);
     expect(body.resource_name).toBe("Second Opinion");
+    expect((await fetch(`${base}/.well-known/oauth-protected-resource/mcp/session`)).status).toBe(200);
   });
 
   it("serves authorization server metadata with PKCE S256", async () => {
@@ -422,7 +423,7 @@ describe("authorization + token flow", () => {
     expect(mcpResponse.status).toBe(200);
   });
 
-  it("describes the grant as following the workspace selected by local Codex", async () => {
+  it("describes the grant as covering only workspaces authorized by local Codex", async () => {
     const clientId = await registerClient();
     const { challenge } = pkceVerifierAndChallenge();
     const pairing = bridge.pairing.create();
@@ -438,7 +439,8 @@ describe("authorization + token flow", () => {
     pageRequest.searchParams.set("resource", `${base}/mcp`);
     const page = await (await fetch(pageRequest)).text();
     expect(page).toContain("<h1>Second Opinion</h1>");
-    expect(page).toContain("workspace currently selected by local Codex on this computer");
+    expect(page).toContain("workspaces authorized by local Codex on this computer");
+    expect(page).toContain("Authorization started from:");
     expect(page).not.toContain("requesting access to workspace");
   });
 

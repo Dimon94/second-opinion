@@ -83,7 +83,7 @@ function pairingPage(opts: {
   error?: string;
 }): string {
   const scopeLabels: Record<string, string> = {
-    "workspace.read": "Read files in this workspace",
+    "workspace.read": "Read files in workspaces authorized by local Codex",
     "workspace.search": "Search this workspace",
     "git.read": "Read git status and diffs",
     "execution.read": "Read Codex execution summaries",
@@ -130,8 +130,8 @@ function pairingPage(opts: {
 <body>
 <div class="card">
   <h1>${escapedProductName}</h1>
-  <p class="sub">ChatGPT is requesting read-only access to the workspace currently selected by local Codex on this computer.</p>
-  <p class="sub">Current workspace: <strong>${escapedWorkspaceName}</strong></p>
+  <p class="sub">ChatGPT is requesting read-only access to workspaces authorized by local Codex on this computer.</p>
+  <p class="sub">Authorization started from: <strong>${escapedWorkspaceName}</strong></p>
   <ul>${scopeList}</ul>
   <form method="POST" action="authorize">
     <input type="hidden" name="request_id" value="${escapedRequestId}">
@@ -181,9 +181,11 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
   };
   router.get("/.well-known/oauth-authorization-server", asMetadataHandler);
   router.get("/.well-known/oauth-authorization-server/mcp", asMetadataHandler);
+  router.get("/.well-known/oauth-authorization-server/mcp/session", asMetadataHandler);
   router.get("/.well-known/openid-configuration", asMetadataHandler);
   router.get("/.well-known/oauth-protected-resource", prMetadataHandler);
   router.get("/.well-known/oauth-protected-resource/mcp", prMetadataHandler);
+  router.get("/.well-known/oauth-protected-resource/mcp/session", prMetadataHandler);
 
   // ---- Dynamic Client Registration (RFC 7591) ------------------------------
 
