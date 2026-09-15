@@ -43,11 +43,14 @@ Dispatch only its `nextAction`; do not infer recovery state from other fields.
    `SECOND_OPINION_BINDING_TOOLS_UNAVAILABLE` and report that the Connector
    candidate must be deployed or refreshed. Do not use a browser conversation
    or legacy `/mcp` as a substitute.
-6. From `<current-project-root>`, run `c2c binding bootstrap --json`. Pass its
-   raw `bootstrapToken` only to `@Second Opinion.bind_workspace`, then pass the
-   returned private `binding_token` to `@Second Opinion.workspace_info` and one
-   top-level `@Second Opinion.read_file` call. Require the canonical root to
-   equal `<current-project-root>` and include the token in every routed read.
+6. From `<current-project-root>`, run `c2c workspace --json` and keep its
+   locally computed `workspaceId`, which is derived from the canonical cwd.
+   Do not use a workspace name or `rootAlias` as identity proof. Run
+   `c2c binding bootstrap --json`, pass its raw `bootstrapToken` only to
+   `@Second Opinion.bind_workspace`, then pass the returned private
+   `binding_token` to `@Second Opinion.workspace_info` and one top-level
+   `@Second Opinion.read_file` call. Require the remote `workspaceId` to exactly
+   equal the local `workspaceId` and include the token in every routed read.
 7. Run `c2c binding unbind --json` from the same task and cwd.
 
 Completion criterion: doctor has no unfinished action, the current Codex task

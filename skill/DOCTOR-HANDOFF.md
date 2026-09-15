@@ -39,8 +39,9 @@ The table is normative. There is one `nextAction` per doctor result.
 | `administrator_approval` | `built-in` | `user` | `no` | `rerun` |
 | `manual_recovery` | `none` | `user` | `no` | `stop` |
 
-- `none`: in direct mode, verify the current task's `@Second Opinion` schemas,
-  then bind and confirm the requested canonical workspace.
+- `none`: in direct mode, run `c2c workspace --json` from the task cwd, verify
+  the current task's `@Second Opinion` schemas, then bind and require its
+  `workspace_info.workspaceId` to equal the locally computed `workspaceId`.
 - `retry_wait`: keep local and browser state untouched, wait as directed, then rerun doctor.
 - `cloudflare_login`: run `c2c tunnel login --force --json` and keep it running. Open
   the emitted `nextAction.page` in the built-in browser only, stop for the user,

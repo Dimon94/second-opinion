@@ -104,6 +104,14 @@ describe("setup and run Skill doctor handoff", () => {
     expect(run).toContain("CODEX_THREAD_ID");
     expect(setup).toContain("c2c binding bootstrap --json");
     expect(run).toContain("c2c binding bootstrap --json");
+    expect(setup).toContain("c2c workspace --json");
+    expect(run).toContain("c2c workspace --json");
+    expect(setup).toContain("remote `workspaceId` to exactly");
+    expect(run).toContain("returned `workspaceId` to exactly");
+    expect(setup).toContain("Do not use a workspace name or `rootAlias`");
+    expect(run).toContain("do not accept a name or `rootAlias`");
+    expect(setup).not.toContain("Require the canonical root");
+    expect(run).not.toContain("returned canonical root");
     expect(setup).toContain("c2c binding unbind --json");
     expect(run).toContain("c2c binding unbind --json");
     expect(setup).not.toMatch(/binding (?:bootstrap|unbind).*--task/);

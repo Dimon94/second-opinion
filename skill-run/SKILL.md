@@ -37,13 +37,16 @@ Dispatch only its `nextAction`; do not infer recovery state from other fields.
    If any is absent, stop with `SECOND_OPINION_BINDING_TOOLS_UNAVAILABLE` and
    report that the Connector candidate must be deployed or refreshed. Do not
    use browser ChatGPT or legacy `/mcp` as a substitute.
-4. From `<current-project-root>`, run `c2c binding bootstrap --json`. Send the
-   raw `bootstrapToken` only to `@Second Opinion.bind_workspace`. Keep the
-   returned `binding_token` private.
+4. From `<current-project-root>`, run `c2c workspace --json` and keep its
+   locally computed `workspaceId` as the expected identity. This command
+   canonicalizes the current cwd; do not accept a name or `rootAlias` as proof.
+   Then run `c2c binding bootstrap --json`, send the raw `bootstrapToken` only
+   to `@Second Opinion.bind_workspace`, and keep the returned `binding_token` private.
 5. Call `@Second Opinion.workspace_info` with that `binding_token`. Require the
-   returned canonical root to equal `<current-project-root>`. Then call
-   `@Second Opinion.read_file` with the same token and one relevant relative
-   path. Include the token in every later `workspace_info` and `read_file` call.
+   returned `workspaceId` to exactly equal the locally computed `workspaceId`.
+   Then call `@Second Opinion.read_file` with the same token and one relevant
+   relative path. Include the token in every later `workspace_info` and
+   `read_file` call.
 6. Codex executes and tests the user's task. Issue #13 only establishes the
    direct workspace binding and read path; do not claim a separate advisor plan
    or review unless the host actually returns one.
