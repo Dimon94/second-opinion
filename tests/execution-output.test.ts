@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { sanitizeExecutionOutput, MAX_OUTPUT_LINES } from "../src/execution/sanitize.js";
+import { sanitizeDiagnosticValue, sanitizeExecutionOutput, MAX_OUTPUT_LINES } from "../src/execution/sanitize.js";
 import { listExecutionOutputs, readExecutionOutput, saveExecutionOutput } from "../src/execution/output.js";
 import { cleanup, isolateStateDir } from "./helpers.js";
 
@@ -14,6 +14,17 @@ describe("sanitizeExecutionOutput", () => {
       expect(result.text).toContain("[REDACTED]");
       expect(result.text).not.toContain("ABCD-EFGH");
     }
+  });
+
+  it("redacts workspace binding credentials in raw and structured diagnostics", () => {
+    const bootstrap = "c2c_boot_abcdefghijklmnopqrstuvwxyz0123456789";
+    const binding = "c2c_bind_abcdefghijklmnopqrstuvwxyz0123456789";
+    const raw = sanitizeExecutionOutput(`${bootstrap}\n${binding}`);
+    expect(raw.allowed).toBe(true);
+    if (raw.allowed) expect(raw.text).toBe("[REDACTED]\n[REDACTED]");
+
+    const structured = sanitizeDiagnosticValue({ bootstrap, nested: [binding] });
+    expect(structured).toEqual({ bootstrap: "[REDACTED]", nested: ["[REDACTED]"] });
   });
 
   it("rejects private keys entirely", () => {
