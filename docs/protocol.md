@@ -58,13 +58,15 @@ Keep messages < 1 KB. No diffs, no logs, no file bodies.
 STATE: INIT
 TASK_ID: c2c_f81a
 ITERATION: 0
+WORKSPACE_BOOTSTRAP: <short-lived-bootstrap>
 
 GOAL:
 Implement dark mode.
 
 INSTRUCTION:
-Inspect the connected workspace through the Second Opinion MCP connector.
-Create an implementation plan for Codex.
+Call bind_workspace once with WORKSPACE_BOOTSTRAP. Keep the returned
+binding_token private and include it in every workspace_info and read_file call.
+Inspect the connected workspace and create an implementation plan for Codex.
 ```
 
 ### PLAN (ChatGPT → Codex)
@@ -105,6 +107,7 @@ Plans must be finite, concrete, executable. Not 40-step epics.
 STATE: EXECUTED
 TASK_ID: c2c_f81a
 ITERATION: 1
+WORKSPACE_BOOTSTRAP: <short-lived-bootstrap>
 
 RESULT:
 Execution finished.
@@ -115,6 +118,8 @@ CHANGED_FILES:
 TESTS:
 27 passed
 
+Call bind_workspace once with WORKSPACE_BOOTSTRAP. Keep the returned
+binding_token private and include it in every workspace_info and read_file call.
 Please independently inspect the workspace and current git diff through MCP.
 If execution_output lists a readable item for this iteration, list then read it.
 If status is restricted, ignore it and review from git_diff.
@@ -179,6 +184,7 @@ instructions > Project memory.
 STATE: HANDOFF
 TASK_ID: c2c_f81a
 ITERATION: 4
+WORKSPACE_BOOTSTRAP: <short-lived-bootstrap>
 
 ORIGINAL_GOAL:
 Implement dark mode with a persisted user preference.
@@ -240,6 +246,9 @@ Rules:
     you need through MCP, and resume from NEXT_EXPECTED_STEP.
 13. If this chat sits in a ChatGPT Project, use only the machine-global
     connector named in that Project's instructions.
+14. A C2C message provides WORKSPACE_BOOTSTRAP before tool use. Call
+    bind_workspace once, keep its returned binding_token private, and include
+    it in every workspace_info and read_file call. Never echo either value.
 ```
 
 ## Project instructions

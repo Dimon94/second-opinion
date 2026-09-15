@@ -89,4 +89,20 @@ describe("setup and run Skill doctor handoff", () => {
       "A green local outcome does not cancel nextAction"
     );
   });
+
+  it("binds the host workspace before the production Connector reads it", () => {
+    const shared = read("skill/DOCTOR-HANDOFF.md");
+    const setup = read("skill/SKILL.md");
+    const run = read("skill-run/SKILL.md");
+    const protocol = read("docs/protocol.md");
+
+    expect(shared).toContain("/mcp/session");
+    expect(shared).toContain("never retry through the legacy `/mcp`");
+    expect(setup).toContain("c2c binding bootstrap -w <current-project-root>");
+    expect(run).toContain("c2c binding bootstrap -w <current-project-root>");
+    expect(setup).toContain("c2c binding unbind --task <SETUP_TASK_ID>");
+    expect(run).toContain("c2c binding unbind --task <TASK_ID>");
+    expect(protocol).toContain("WORKSPACE_BOOTSTRAP:");
+    expect(protocol).toContain("include it in every workspace_info and read_file call");
+  });
 });

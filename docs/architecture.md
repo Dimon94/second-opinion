@@ -34,14 +34,14 @@
 - **Computer Use = control plane**: tiny `[C2C]` state messages (< 1 KB).
 - **MCP = data plane**: ChatGPT pulls files/diffs/search results itself.
 - **Read-only by design**: no write/exec tools exist in V1 at all.
-- **Workspace is the data boundary**: one machine-global bridge serves one locally selected canonical workspace at a time.
+- **Task binding is the routed data boundary**: one machine-global bridge serves several locally authorized canonical workspaces without remote root selection.
 
 ## Components (src/)
 
 | Module | Responsibility |
 | --- | --- |
 | `bridge/` | Express app assembly, loopback-only listener, port fallback, runtime state, admin API |
-| `mcp/` | McpServer with 9 read-only tools; stateless Streamable HTTP transport (fresh server per request, JSON responses) |
+| `mcp/` | Session-routed McpServer with `workspace_info` and `read_file`; legacy 9-tool entry remains isolated until #14; stateless Streamable HTTP transport |
 | `auth/` | OAuth 2.1 authorization server: discovery metadata (RFC 8414 + Protected Resource Metadata), dynamic client registration (RFC 7591), authorization-code + PKCE (S256 only), refresh rotation, revocation (RFC 7009). Opaque tokens stored as SHA-256 hashes |
 | `pairing/` | PairingCode lifecycle: CSPRNG generation, TTL, attempt limits, IP rate limit, one-time use |
 | `workspace/` | Canonical-path containment (realpath of deepest existing ancestor), sensitive-file policy, `.c2cignore`, paginated read/list, ripgrep search with Node fallback, git status/diff with pagination |
@@ -53,21 +53,23 @@
 
 ## Request lifecycles
 
-**MCP call**: ChatGPT → tunnel (https) → bridge `/mcp` → bearer middleware
-(401/403) → stateless StreamableHTTP transport → tool handler → workspace layer
-(path containment → ignore rules → pagination) → JSON result.
+**MCP call**: ChatGPT → tunnel (https) → bridge `/mcp/session` → OAuth bearer
+middleware → `binding_token` + `openai/session` validation → stateless
+StreamableHTTP transport → tool handler → immutable per-request workspace layer
+(path containment → ignore rules → pagination) → JSON result. The legacy
+`/mcp` entry is never a fallback for a failed routed request.
 
 **Authorization**: 401 with `WWW-Authenticate: resource_metadata=…` →
 `/.well-known/oauth-protected-resource/mcp` → AS metadata → DCR →
 `/oauth/authorize` (HTML pairing page) → pairing code verified → 302 with
 authorization code → `/oauth/token` (PKCE S256) → access + refresh tokens.
 
-**Ports and workspace activation**: prefer 48765 and bind 127.0.0.1 only. The
-CLI observes one machine-global runtime record. A healthy bridge is reused and
-the requested canonical workspace is activated through the loopback,
-admin-token-protected API; its PID, port, tunnel and authorization state stay
-unchanged. Only a missing runtime or a positively dead PID permits a replacement
-process. The runtime record follows the active workspace; users never see ports.
+**Ports and workspace binding**: prefer 48765 and bind 127.0.0.1 only. The CLI
+observes one machine-global runtime record. A healthy bridge is reused; local
+Codex mints a short-lived bootstrap for the invoking task and canonical cwd.
+ChatGPT redeems it once and supplies the returned binding token on every routed
+request. Legacy workspace activation remains isolated for migration. Only a
+missing runtime or a positively dead PID permits a replacement process.
 
 **Tunnel**: a machine-global Cloudflare Named Tunnel is the recommended stable
 setup (`c2c tunnel choose --mode named`). The Skill asks before the first public

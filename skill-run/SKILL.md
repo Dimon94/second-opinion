@@ -9,7 +9,7 @@ description: >
 # Run with Codex and ChatGPT
 
 ChatGPT plans and reviews. Codex executes and tests. The same global Connector
-serves the workspace that local doctor activates.
+routes each task through its locally authorized workspace binding.
 
 ## Required reference
 
@@ -23,7 +23,7 @@ grant state.
 
 ## Boundary
 
-- Begin every ChatGPT turn by activating the current workspace through doctor.
+- Begin every ChatGPT turn by checking the global connection through doctor.
 - Use the saved conversation disposition returned by doctor; a conversation is not a Connector.
 - ChatGPT reads and reviews through the exact returned Connector. Codex owns edits, shell, git, and tests.
 - Keep `[C2C]` control messages below 1 KB. Never paste files, diffs, or logs into ChatGPT.
@@ -43,7 +43,7 @@ grant state.
    through `<checkout>/skill/DOCTOR-HANDOFF.md`. Resume every pause with that
    same workspace path. Do not send `[C2C]` while a local or HITL action remains.
 3. For `open_conversation` or `create_conversation`, use the one foreground
-   built-in-browser tab and verify `workspace_info` before task work.
+   built-in-browser tab.
 4. Read `c2c session -w <current-project-root> --json` and resume its checkpoint
    before creating a task id or sending INIT:
    - `EXECUTED_SENT` + `GPT_REVIEW`: wait for review; do not resend.
@@ -53,27 +53,32 @@ grant state.
    - `DONE`: clear the checkpoint and finish.
    - `BLOCKED`: surface the one unresolved decision.
 
-Completion criterion: the browser is on the verified conversation for this
-workspace and checkpoint recovery has selected exactly one next protocol step.
+Completion criterion: the browser is on the selected conversation and
+checkpoint recovery has selected exactly one next protocol step. The next
+outbound C2C message must carry a fresh locally minted workspace bootstrap.
 
 ## Plan
 
 Generate `TASK_ID` as `c2c_` plus four random hexadecimal characters unless the
-checkpoint already has one. Send:
+checkpoint already has one. Run
+`c2c binding bootstrap -w <current-project-root> --task <TASK_ID> --json`, then
+send its raw `bootstrapToken` only in this control message:
 
 ```text
 [C2C]
 STATE: INIT
 TASK_ID: <task-id>
 ITERATION: 0
+WORKSPACE_BOOTSTRAP: <bootstrap-token>
 
 GOAL:
 <user goal in one paragraph>
 
 INSTRUCTION:
-Call workspace_info with the exact returned Connector. If it names the expected
-workspace, inspect the workspace and return a substantive C2C PLAN. Otherwise
-reply BLOCKED.
+Call bind_workspace once with WORKSPACE_BOOTSTRAP. Keep its returned
+binding_token private and include it in every workspace_info and read_file call.
+If workspace_info names the expected workspace, inspect it and return a
+substantive C2C PLAN. Otherwise reply BLOCKED. Never echo either credential.
 ```
 
 Persist `INIT` / `GPT_PLAN`. A valid PLAN includes rationale, concrete actions,
@@ -85,12 +90,18 @@ likely files, tests, and success criteria. Persist `PLAN_RECEIVED` before execut
 2. Record changed files, tests, and sanitized command output with `c2c record`;
    persist `EXECUTED_LOCAL` before sending the review message.
 3. Rerun `c2c doctor -w <current-project-root> --json` and follow the shared
-   handoff. Verify `workspace_info` again before sending EXECUTED.
-4. Send the small `[C2C] STATE: EXECUTED` summary. ChatGPT independently reads
-   the current diff and released test output, then replies PLAN, DONE, or BLOCKED.
+   handoff. Run `c2c binding bootstrap -w <current-project-root> --task <TASK_ID> --json`
+   before sending EXECUTED.
+4. Send the small `[C2C] STATE: EXECUTED` summary with
+   `WORKSPACE_BOOTSTRAP: <bootstrapToken>`. ChatGPT calls `bind_workspace`, then
+   independently reads the current diff and released test output with the
+   returned `binding_token` on every routed request. Tools not yet migrated to
+   the session entry fail closed until #14; never retry them through `/mcp`.
+   It then replies PLAN, DONE, or BLOCKED.
 5. Persist `EXECUTED_SENT` / `GPT_REVIEW`. On PLAN, run the next finite iteration.
-   On DONE, persist DONE and clear the checkpoint. On BLOCKED, surface the one
-   user decision after fixing everything safely in scope.
+   On DONE, run `c2c binding unbind --task <TASK_ID> --json`, persist DONE, and
+   clear the checkpoint. On BLOCKED, surface the one user decision after fixing
+   everything safely in scope.
 6. Respect `.c2c.json` `maxIterations` (default 12); ask before continuing beyond it.
 
 Completion criterion: ChatGPT returns DONE after reviewing the verified

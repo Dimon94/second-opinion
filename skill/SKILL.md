@@ -9,7 +9,8 @@ description: >
 # Codex with ChatGPT setup
 
 Create and repair one reusable ChatGPT connection for this computer. Codex
-selects the active local workspace; ChatGPT cannot select a filesystem path.
+locally authorizes the invoking task's workspace; ChatGPT cannot select a
+filesystem path.
 
 ## Required reference
 
@@ -58,9 +59,16 @@ Edge, `open <url>`, cookies, browser storage, or account credentials.
 4. Run `c2c doctor -w <current-project-root> --json` and dispatch its one
    `nextAction` through `<checkout>/skill/DOCTOR-HANDOFF.md`. After every HITL
    action, rerun doctor with the identical workspace path.
-5. For the returned conversation action, send the Boot Prompt from
-   `docs/protocol.md`, require the exact Connector to call `workspace_info` and
-   read a top-level file, and verify the reported workspace before saving the URL.
+5. For the returned conversation action, generate `SETUP_TASK_ID` as
+   `c2c_setup_` plus four random hexadecimal characters. Run
+   `c2c binding bootstrap -w <current-project-root> --task <SETUP_TASK_ID> --json`.
+   Append its raw `bootstrapToken` to the Boot Prompt from `docs/protocol.md` as
+   `WORKSPACE_BOOTSTRAP: <bootstrapToken>` and send it only to the foreground
+   C2C conversation. Require the exact Connector to call `bind_workspace` once,
+   then pass the returned `binding_token` to `workspace_info` and one top-level
+   `read_file` call. Never record or echo either credential.
+6. After both calls identify the requested workspace, run
+   `c2c binding unbind --task <SETUP_TASK_ID> --json`, then save the verified URL.
 
 Completion criterion: doctor has no unfinished local or HITL stage,
 `workspace_info` names the requested workspace, and the read-only file check passes.

@@ -172,10 +172,10 @@ Credentials stay in the OS app state directory, not in the project.
 - **Control plane (Computer Use)**: Codex and ChatGPT exchange tiny structured
   `[C2C]` state messages — `INIT → PLAN → EXECUTED → REVIEW → DONE`. No diffs,
   no logs, no file bodies are ever pasted.
-- **Data plane (MCP)**: ChatGPT pulls what it needs itself through 9 read-only
-  tools: `workspace_info`, `list_directory`, `read_file`, `search_workspace`,
-  `git_status`, `git_diff`, `test_status`, `execution_summary`,
-  `execution_output`.
+- **Data plane (MCP)**: the production Connector uses `/mcp/session`. The first
+  routed slice exposes `workspace_info` and `read_file`; every request requires
+  OAuth plus the task/session `binding_token`. The remaining read-only tools
+  stay unavailable on this entry until #14.
 - **Independent review**: after Codex executes, ChatGPT inspects the actual
   git diff and test records through MCP — it never trusts "all tests passed"
   claims blindly.
@@ -184,18 +184,19 @@ Credentials stay in the OS app state directory, not in the project.
 
 - **Read-only by construction**: write/delete/shell/commit tools simply do not
   exist on the server. No prompt injection can enable them.
-- **The active workspace is the boundary**: one machine-global grant follows
-  the canonical workspace selected locally by Codex. Remote OAuth/MCP requests
-  cannot choose another workspace; path containment blocks symlink, `../`, and
-  absolute-path escapes.
+- **The local task binding is the boundary**: one machine-global grant can serve
+  several workspaces authorized by local Codex. Remote OAuth/MCP requests cannot
+  choose a root; every routed request must match its task/session binding, and
+  path containment blocks symlink, `../`, and absolute-path escapes.
 - **Sensitive files never leave**: `.env*`, keys, SSH, credentials are denied by
   default (`.env.example` allowed); `.c2cignore` adds your own rules.
 - **Knowing the URL grants nothing**: the public MCP endpoint requires OAuth 2.1
   (PKCE S256, dynamic client registration, rotating refresh tokens). Without a
   token: 401. Wrong workspace: 403.
-- **The model never sees long-lived credentials**: the only secret that ever
-  touches a browser is a one-time pairing code (5-minute TTL, 5 attempts,
-  rate-limited, destroyed on use).
+- **The model never sees OAuth credentials**: a one-time pairing code authorizes
+  OAuth. A C2C control message also carries a five-minute, single-use workspace
+  bootstrap; its returned binding token is scoped to the OAuth client and
+  `openai/session`.
 
 Full threat model: [docs/security.md](docs/security.md)
 

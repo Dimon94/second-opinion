@@ -11,6 +11,14 @@ A green local outcome does not cancel nextAction. `healthy` or `repaired` can
 still require a remote conversation action. Conversely, exit status 2 is a
 planned HITL pause, not a failed recovery.
 
+The Connector endpoint returned by doctor is the session-routed `/mcp/session`
+entry. Before a conversation calls it, the invoking Skill must mint a local
+bootstrap for the current host workspace and task. ChatGPT consumes that value
+once with `bind_workspace`, keeps the returned `binding_token` private, and
+includes it in every later `workspace_info` or `read_file` call. Missing or
+mismatched binding errors stop the flow; never retry through the legacy `/mcp`
+entry. Do not record, log, or echo either credential.
+
 ## Action policy
 
 The table is normative. There is one `nextAction` per doctor result.
