@@ -199,12 +199,14 @@ export class AuthStore {
   private tokens = new Map<string, TokenRecord>();
   private authCodes = new Map<string, AuthorizationCodeRecord>();
   private readonly file: string;
+  private readonly onRevoke?: () => void;
   private migrationPending = false;
   bridgeId = `c2c_bridge_${randomBytes(16).toString("base64url")}`;
 
-  constructor(opts: { file?: string } = {}) {
+  constructor(opts: { file?: string; onRevoke?: () => void } = {}) {
     this.file =
       opts.file ?? path.join(ensureDir(path.join(getStateDir(), "auth")), "store.json");
+    this.onRevoke = opts.onRevoke;
     this.load();
   }
 
@@ -494,6 +496,7 @@ export class AuthStore {
       client.grant = { ...grant, state: "revoked" };
     }
     this.save();
+    this.onRevoke?.();
     return true;
   }
 
@@ -521,9 +524,11 @@ export class AuthStore {
         runtimeReloadPending: false,
         result: { version: 1, status: "consent_required", reason: "revoked" },
       });
+      this.onRevoke?.();
       return count;
     }
     this.save();
+    this.onRevoke?.();
     return count;
   }
 

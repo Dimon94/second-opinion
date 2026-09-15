@@ -66,6 +66,7 @@ import {
 import { appendExecutionRecord } from "../execution/records.js";
 import { saveExecutionOutput } from "../execution/output.js";
 import { sanitizeDiagnosticText, sanitizeDiagnosticValue } from "../execution/sanitize.js";
+import { WorkspaceBindingStore } from "../session/bindings.js";
 import {
   createDoctorResult,
   createRecoveryLeaseDoctorResult,
@@ -285,6 +286,57 @@ program
   .description(`${PRODUCT_NAME} — ChatGPT thinks. Codex works.`)
   .version(VERSION, "-v, --version")
   .configureHelp({ sortSubcommands: true });
+
+function acceptUnusedWorkspaceOption(command: Command): Command {
+  return command.option("-w, --workspace <path>", "ignored; this command is machine-wide");
+}
+
+const bindingCmd = program.command("binding").description("Authorize a task-scoped workspace binding");
+
+bindingCmd
+  .command("bootstrap")
+  .option("-w, --workspace <path>", "workspace root (defaults to current directory)")
+  .requiredOption("--task <id>", "local Codex task id")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { workspace?: string; task: string; json: boolean }) => {
+    try {
+      const observation = await findBridgeObservation();
+      if (observation.state !== "healthy") throw new Error("A healthy Bridge is required before workspace binding.");
+      const result = await adminFetch<{ bootstrapToken: string; expiresAt: number }>(
+        observation.runtime,
+        "POST",
+        "/admin/bindings/bootstrap",
+        60_000,
+        { workspaceRoot: resolveWorkspace(opts.workspace), taskId: opts.task }
+      );
+      if (opts.json) say(JSON.stringify({ ok: true, ...result }));
+      else say(result.bootstrapToken);
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+bindingCmd
+  .command("unbind")
+  .requiredOption("--task <id>", "local Codex task id")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { task: string; json: boolean }) => {
+    try {
+      const observation = await findBridgeObservation();
+      if (observation.state !== "healthy") throw new Error("A healthy Bridge is required before unbinding.");
+      const result = await adminFetch<{ removed: number }>(
+        observation.runtime,
+        "POST",
+        "/admin/bindings/unbind",
+        60_000,
+        { taskId: opts.task }
+      );
+      if (opts.json) say(JSON.stringify({ ok: true, ...result }));
+      else check(`已解绑 ${result.removed} 个会话工作区`);
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
 
 // ---------------------------------------------------------------- serve (internal)
 
@@ -874,7 +926,7 @@ program
       await adminFetch(runtime, "POST", "/admin/revoke-all");
     } else {
       // bridge not running: revoke directly in the persisted store
-      new AuthStore().revokeAll();
+      new AuthStore({ onRevoke: () => new WorkspaceBindingStore().clear() }).revokeAll();
     }
     check("已断开 ChatGPT 对本机全局 Bridge 的访问（所有令牌已吊销）");
   });
@@ -923,8 +975,7 @@ program
 
 // ---------------------------------------------------------------- sandbox-allow (Codex writable_roots, macOS + Windows)
 
-program
-  .command("sandbox-allow")
+acceptUnusedWorkspaceOption(program.command("sandbox-allow"))
   .description("Add the local settings directory to the Codex sandbox allowlist")
   .option("--json", "machine-readable output", false)
   .action((opts: { json: boolean }) => {
@@ -957,8 +1008,7 @@ function runGit(args: string[]): { ok: boolean; stdout: string } {
   return { ok: result.status === 0, stdout: (result.stdout ?? "").trim() };
 }
 
-program
-  .command("update-check")
+acceptUnusedWorkspaceOption(program.command("update-check"))
   .description("Check GitHub for a newer version (real check at most once per local day)")
   .option("--force", "check even if already checked today", false)
   .option("--json", "machine-readable output", false)
@@ -1135,8 +1185,7 @@ session
     else check("已清除会话记录，下次任务将新建 ChatGPT 会话");
   });
 
-const prefsCmd = program
-  .command("prefs")
+const prefsCmd = acceptUnusedWorkspaceOption(program.command("prefs"))
   .description("Remember ChatGPT developer mode and setup choice for this machine");
 
 prefsCmd
@@ -1344,8 +1393,7 @@ tunnelCmd
     }
   });
 
-tunnelCmd
-  .command("login")
+acceptUnusedWorkspaceOption(tunnelCmd.command("login"))
   .description("Open the Cloudflare login window used by a named hostname")
   .option("--json", "machine-readable output", false)
   .option("--force", "replace an existing rejected Cloudflare login certificate", false)

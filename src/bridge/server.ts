@@ -7,7 +7,9 @@ import { createOAuthRouter } from "../auth/oauth.js";
 import { bearerAuth } from "../auth/middleware.js";
 import { PairingManager } from "../pairing/manager.js";
 import { createMcpServer } from "../mcp/server.js";
+import { createSessionMcpServer } from "../mcp/session-server.js";
 import { createMcpHttpHandler } from "../mcp/http.js";
+import { WorkspaceBindingStore } from "../session/bindings.js";
 import { CloudflaredQuickTunnel } from "../tunnel/cloudflared.js";
 import { CloudflaredNamedTunnel } from "../tunnel/cloudflared-named.js";
 import type { TunnelProvider } from "../tunnel/provider.js";
@@ -45,6 +47,8 @@ export interface BridgeOptions {
   authStoreFile?: string;
   pairingTtlMs?: number;
   accessTokenTtlMs?: number;
+  bindingStoreFile?: string;
+  bindingBootstrapTtlMs?: number;
 }
 
 export interface Bridge {
@@ -54,6 +58,7 @@ export interface Bridge {
   adminToken: string;
   authStore: AuthStore;
   pairing: PairingManager;
+  bindings: WorkspaceBindingStore;
   tunnel: TunnelProvider;
   getPublicBaseUrl(): string | null;
   localBaseUrl(): string;
@@ -92,7 +97,8 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     throw new Error("The bridge only binds to loopback addresses. Public exposure goes through the tunnel.");
   }
 
-  const authStore = new AuthStore({ file: opts.authStoreFile });
+  const bindings = new WorkspaceBindingStore({ file: opts.bindingStoreFile, bootstrapTtlMs: opts.bindingBootstrapTtlMs });
+  const authStore = new AuthStore({ file: opts.authStoreFile, onRevoke: () => bindings.clear() });
   const pairing = new PairingManager(workspace.id, { ttlMs: opts.pairingTtlMs });
   let tunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger);
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
@@ -139,6 +145,15 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       void mcpHandler(req, res);
     }
   );
+  const sessionMcpHandler = createMcpHttpHandler(() => createSessionMcpServer(bindings, logger), logger);
+  app.all(
+    "/mcp/session",
+    express.json({ limit: "8mb" }),
+    bearerAuth({ store: authStore, getBaseUrl, logger }),
+    (req: Request, res: Response) => {
+      void sessionMcpHandler(req, res);
+    }
+  );
 
   // ---- Admin API (loopback + admin token only; used by the CLI/Skill) --------
 
@@ -155,6 +170,39 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     }
     next();
   };
+
+  app.post(
+    "/admin/bindings/bootstrap",
+    adminGuard,
+    express.json({ limit: "8kb" }),
+    (req: Request, res: Response) => {
+      if (typeof req.body?.workspaceRoot !== "string" || typeof req.body?.taskId !== "string") {
+        res.status(400).json({ error: "invalid_binding_bootstrap", message: "workspaceRoot and taskId are required" });
+        return;
+      }
+      try {
+        res.json(bindings.mint(req.body.workspaceRoot, req.body.taskId));
+      } catch (error) {
+        res.status(400).json({
+          error: "invalid_binding_bootstrap",
+          message: error instanceof Error ? error.message : "Unable to authorize workspace",
+        });
+      }
+    }
+  );
+
+  app.post(
+    "/admin/bindings/unbind",
+    adminGuard,
+    express.json({ limit: "8kb" }),
+    (req: Request, res: Response) => {
+      if (typeof req.body?.taskId !== "string" || !req.body.taskId.trim() || req.body.taskId.trim().length > 200) {
+        res.status(400).json({ error: "invalid_task", message: "taskId is required" });
+        return;
+      }
+      res.json({ removed: bindings.unbindTask(req.body.taskId) });
+    }
+  );
 
   app.post(
     "/admin/workspace",
@@ -216,6 +264,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       tunnel: tunnel.status(),
       tokenCount: authStore.tokenCount(),
       capabilities: { authReload: true },
+      bindingCount: bindings.count(),
       authorization: authStore.authorizationStatus(
         publicBaseUrl ?? `http://${host}:${port}`
       ),
@@ -312,6 +361,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     host,
     adminToken,
     authStore,
+    bindings,
     pairing,
     get tunnel() {
       return tunnel;
