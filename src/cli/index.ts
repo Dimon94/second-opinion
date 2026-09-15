@@ -291,15 +291,22 @@ function acceptUnusedWorkspaceOption(command: Command): Command {
   return command.option("-w, --workspace <path>", "ignored; this command is machine-wide");
 }
 
+function hostTaskId(): string {
+  const taskId = process.env.CODEX_THREAD_ID?.trim();
+  if (!taskId || taskId.length > 200) {
+    throw new Error("CODEX_THREAD_ID is required for a task-scoped workspace binding.");
+  }
+  return taskId;
+}
+
 const bindingCmd = program.command("binding").description("Authorize a task-scoped workspace binding");
 
 bindingCmd
   .command("bootstrap")
-  .option("-w, --workspace <path>", "workspace root (defaults to current directory)")
-  .requiredOption("--task <id>", "local Codex task id")
   .option("--json", "machine-readable output", false)
-  .action(async (opts: { workspace?: string; task: string; json: boolean }) => {
+  .action(async (opts: { json: boolean }) => {
     try {
+      const taskId = hostTaskId();
       const observation = await findBridgeObservation();
       if (observation.state !== "healthy") throw new Error("A healthy Bridge is required before workspace binding.");
       const result = await adminFetch<{ bootstrapToken: string; expiresAt: number }>(
@@ -307,7 +314,7 @@ bindingCmd
         "POST",
         "/admin/bindings/bootstrap",
         60_000,
-        { workspaceRoot: resolveWorkspace(opts.workspace), taskId: opts.task }
+        { workspaceRoot: process.cwd(), taskId }
       );
       if (opts.json) say(JSON.stringify({ ok: true, ...result }));
       else say(result.bootstrapToken);
@@ -318,10 +325,10 @@ bindingCmd
 
 bindingCmd
   .command("unbind")
-  .requiredOption("--task <id>", "local Codex task id")
   .option("--json", "machine-readable output", false)
-  .action(async (opts: { task: string; json: boolean }) => {
+  .action(async (opts: { json: boolean }) => {
     try {
+      const taskId = hostTaskId();
       const observation = await findBridgeObservation();
       if (observation.state !== "healthy") throw new Error("A healthy Bridge is required before unbinding.");
       const result = await adminFetch<{ removed: number }>(
@@ -329,7 +336,7 @@ bindingCmd
         "POST",
         "/admin/bindings/unbind",
         60_000,
-        { taskId: opts.task }
+        { taskId }
       );
       if (opts.json) say(JSON.stringify({ ok: true, ...result }));
       else check(`已解绑 ${result.removed} 个会话工作区`);
@@ -472,6 +479,7 @@ program
   .option("--no-fix", "diagnose only, do not repair")
   .option("--diagnose-only", "diagnose only, do not repair", false)
   .option("--no-tunnel", "do not start or recover a public connection")
+  .option("--direct", "prepare the current Codex task without a ChatGPT Web conversation", false)
   .option("--browser-gate <gate>", "observed ChatGPT gate: chatgpt_login or administrator_approval")
   .option("--browser-page <url>", "current ChatGPT page for an observed browser gate")
   .option("--json", "machine-readable output", false)
@@ -480,6 +488,7 @@ program
     fix: boolean;
     diagnoseOnly: boolean;
     tunnel: boolean;
+    direct: boolean;
     browserGate?: string;
     browserPage?: string;
     json: boolean;
@@ -870,6 +879,7 @@ program
       authorization,
       migration,
       authorizationPage: CHATGPT_PLUGINS_URL,
+      direct: opts.direct,
       tunnelFailure,
       bridgeStopped,
       bridgeUnknown,

@@ -201,6 +201,7 @@ export function createDoctorResult(input: {
   authorization: DoctorAuthorizationResult;
   migration: LegacyMigrationResult | null;
   authorizationPage: string;
+  direct?: boolean;
   tunnelFailure?: "cloudflared_missing" | "transport_down" | "probe_inconclusive";
   bridgeStopped: boolean;
   bridgeUnknown: boolean;
@@ -303,6 +304,15 @@ export function createDoctorResult(input: {
   if (Object.values(input.report).every((check) => check.ok)) {
     const repaired = input.repairs.length > 0;
     const reason = repaired ? "local_repairs_completed" : "all_checks_passed";
+    if (input.direct) {
+      return {
+        ...base,
+        outcome: repaired ? "repaired" : "healthy",
+        reason,
+        safeRetry: true,
+        nextAction: { type: "none" },
+      };
+    }
     const conversation = input.conversation;
     if (!conversation) {
       return {

@@ -114,9 +114,18 @@ describe("session-routed MCP entry", () => {
       await narrowClient.close();
 
       const cli = fileURLToPath(new URL("../src/cli/index.ts", import.meta.url));
+      await expect(execFileAsync(process.execPath, [
+        "--import", "tsx", cli, "binding", "bootstrap", "--json",
+      ], {
+        cwd: rootB,
+        encoding: "utf8",
+        env: Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== "CODEX_THREAD_ID")),
+      })).rejects.toMatchObject({
+        stdout: expect.stringContaining("CODEX_THREAD_ID is required"),
+      });
       const cliBootstrap = await execFileAsync(process.execPath, [
-        "--import", "tsx", cli, "binding", "bootstrap", "-w", rootB, "--task", "task-b", "--json",
-      ], { encoding: "utf8", env: process.env });
+        "--import", "tsx", cli, "binding", "bootstrap", "--json",
+      ], { cwd: rootB, encoding: "utf8", env: { ...process.env, CODEX_THREAD_ID: "task-b" } });
       expect(cliBootstrap.stderr).toBe("");
       const bootstrapB = JSON.parse(cliBootstrap.stdout) as { bootstrapToken: string };
       expect(bridge.workspace.root).toBe(rootA);
@@ -155,7 +164,11 @@ describe("session-routed MCP entry", () => {
       expect(persisted).not.toContain(boundA.binding_token);
       expect(persisted).toContain(rootA);
 
-      expect((await admin("/admin/bindings/unbind", { taskId: "task-a" })).status).toBe(200);
+      const cliUnbind = await execFileAsync(process.execPath, [
+        "--import", "tsx", cli, "binding", "unbind", "--json",
+      ], { cwd: rootA, encoding: "utf8", env: { ...process.env, CODEX_THREAD_ID: "task-a" } });
+      expect(cliUnbind.stderr).toBe("");
+      expect(JSON.parse(cliUnbind.stdout)).toMatchObject({ ok: true, removed: 1 });
       const unbound = await call(client, "session-a", "workspace_info", {
         binding_token: boundA.binding_token,
       });

@@ -317,6 +317,21 @@ describe("c2c doctor contract", () => {
       nextAction: { type: "create_conversation", reason: "conversation_missing" },
       conversation: { mode: "project", workspaceId: expect.any(String) },
     });
+
+    const direct = await runDoctor(
+      fixture.workspace,
+      fixture.stateDir,
+      fixture.codexHome,
+      "--direct",
+      "--json"
+    );
+    expect(direct.status).toBe(0);
+    expect(parseResult(direct.stdout)).toMatchObject({
+      outcome: "healthy",
+      reason: "all_checks_passed",
+      nextAction: { type: "none" },
+      conversation: null,
+    });
   });
 
   it("replaces a healthy bridge without auth-reload capability before migrating", async () => {
