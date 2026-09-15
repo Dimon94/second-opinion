@@ -98,11 +98,22 @@ describe("setup and run Skill doctor handoff", () => {
 
     expect(shared).toContain("/mcp/session");
     expect(shared).toContain("never retry through the legacy `/mcp`");
-    expect(setup).toContain("c2c binding bootstrap -w <current-project-root>");
-    expect(run).toContain("c2c binding bootstrap -w <current-project-root>");
-    expect(setup).toContain("c2c binding unbind --task <SETUP_TASK_ID>");
-    expect(run).toContain("c2c binding unbind --task <TASK_ID>");
+    expect(setup).toContain("@Second Opinion");
+    expect(run).toContain("@Second Opinion");
+    expect(setup).toContain("CODEX_THREAD_ID");
+    expect(run).toContain("CODEX_THREAD_ID");
+    expect(setup).toContain("c2c binding bootstrap --json");
+    expect(run).toContain("c2c binding bootstrap --json");
+    expect(setup).toContain("c2c binding unbind --json");
+    expect(run).toContain("c2c binding unbind --json");
+    expect(setup).not.toMatch(/binding (?:bootstrap|unbind).*--task/);
+    expect(run).not.toMatch(/binding (?:bootstrap|unbind).*--task/);
+    expect(setup).toContain("SECOND_OPINION_BINDING_TOOLS_UNAVAILABLE");
+    expect(run).toContain("SECOND_OPINION_BINDING_TOOLS_UNAVAILABLE");
+    expect(setup).toContain("not #13 direct-host acceptance");
+    expect(run).toContain("not #13 acceptance");
     expect(protocol).toContain("WORKSPACE_BOOTSTRAP:");
+    expect(protocol).toMatch(/`TASK_ID` below correlates C2C\s+messages only/);
     expect(protocol).toContain("include it in every workspace_info and read_file call");
   });
 });

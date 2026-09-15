@@ -1,20 +1,23 @@
 # Doctor handoff
 
-This is the single recovery contract for both C2C Skills. Run
-`c2c doctor -w <workspace> --json`, then read only `version`, `outcome`,
+This is the single recovery contract for both C2C Skills. For the current Codex
+task run `c2c doctor -w <workspace> --direct --json`; browser C2C compatibility
+omits `--direct`. Then read only `version`, `outcome`,
 `reason`, `nextAction`, and the payload of that one action. Bridge, Tunnel,
 endpoint, Connector, grant, and conversation recovery decisions belong to the
 CLI. Never reconstruct them from `report`, legacy compatibility fields, browser
 state, or remembered runs.
 
-A green local outcome does not cancel nextAction. `healthy` or `repaired` can
-still require a remote conversation action. Conversely, exit status 2 is a
-planned HITL pause, not a failed recovery.
+A green local outcome does not cancel nextAction. Connector or OAuth actions
+can remain before direct use, and browser compatibility can still require a
+conversation action. Conversely, exit status 2 is a planned HITL pause, not a
+failed recovery.
 
 The Connector endpoint returned by doctor is the session-routed `/mcp/session`
-entry. Before a conversation calls it, the invoking Skill must mint a local
-bootstrap for the current host workspace and task. ChatGPT consumes that value
-once with `bind_workspace`, keeps the returned `binding_token` private, and
+entry. Before current-task `@Second Opinion` or a compatibility conversation
+calls it, the invoking Skill must mint a local bootstrap from the host
+`CODEX_THREAD_ID` and cwd. The caller consumes that value once with
+`bind_workspace`, keeps the returned `binding_token` private, and
 includes it in every later `workspace_info` or `read_file` call. Missing or
 mismatched binding errors stop the flow; never retry through the legacy `/mcp`
 entry. Do not record, log, or echo either credential.
@@ -36,7 +39,8 @@ The table is normative. There is one `nextAction` per doctor result.
 | `administrator_approval` | `built-in` | `user` | `no` | `rerun` |
 | `manual_recovery` | `none` | `user` | `no` | `stop` |
 
-- `none`: continue only after `workspace_info` confirms the requested workspace.
+- `none`: in direct mode, verify the current task's `@Second Opinion` schemas,
+  then bind and confirm the requested canonical workspace.
 - `retry_wait`: keep local and browser state untouched, wait as directed, then rerun doctor.
 - `cloudflare_login`: run `c2c tunnel login --force --json` and keep it running. Open
   the emitted `nextAction.page` in the built-in browser only, stop for the user,
@@ -52,9 +56,9 @@ The table is normative. There is one `nextAction` per doctor result.
   only credential Codex may type.
 - `chatgpt_login`: open `nextAction.page` and stop. The user completes login,
   MFA, CAPTCHA, or account selection.
-- `open_conversation`: open `nextAction.page` in the existing C2C tab. If it is
+- `open_conversation`: browser compatibility only. Open `nextAction.page` in the existing C2C tab. If it is
   already open, do not navigate again. Verify `workspace_info` before task work.
-- `create_conversation`: create one conversation in the returned Project when
+- `create_conversation`: browser compatibility only. Create one conversation in the returned Project when
   `nextAction.page` is present, otherwise use a new Chat conversation. Send the
   Boot Prompt, verify `workspace_info`, then persist the verified URL with
   `c2c session set -w <same-workspace> --url <url>`.

@@ -8,84 +8,70 @@ description: >
 
 # Codex with ChatGPT setup
 
-Create and repair one reusable ChatGPT connection for this computer. Codex
-locally authorizes the invoking task's workspace; ChatGPT cannot select a
-filesystem path.
+Configure one machine-global `Second Opinion` Connector, then verify it from
+the current Codex project task with a task-scoped read-only workspace binding.
 
 ## Required reference
 
-Before interpreting any doctor result, read `<checkout>/skill/DOCTOR-HANDOFF.md`
-completely. It is the shared `outcome` / `reason` / `nextAction` contract for
-this Skill and `codex-with-chatgpt-run`.
-
-Completion criterion: every doctor result is dispatched only through that
-reference; this Skill does not infer Bridge, Tunnel, endpoint, Connector, or
-grant state.
-
-## Boundary
-
-- This Skill owns first connection, connection repair, and disconnect.
-- The Connector name comes from `nextAction.connectorName`; never invent a second one.
-- Keep account, consent, and control-plane changes visible to the user.
-- Finish setup after the selected workspace passes `workspace_info` and one read-only file call.
-- Task planning and review belong to `codex-with-chatgpt-run`.
+Before interpreting doctor output, read `<checkout>/skill/DOCTOR-HANDOFF.md`.
+Dispatch only its `nextAction`; do not infer recovery state from other fields.
 
 ## Locations
 
 - The codex-with-chatgpt checkout lives at: `<ACTUAL_CHECKOUT_PATH>`
 - Let `<checkout>` mean that path. CLI:
   `node "<checkout>/bin/c2c.js" <command>` or a globally linked `c2c`.
-- Protocol: `<checkout>/docs/protocol.md`.
-- Always pass `-w <current-project-root>`.
-
-## Browser
-
-Use `control-in-app-browser` and only the built-in browser. Reuse one foreground
-ChatGPT tab, mark it for handoff, and leave it open. The shared doctor handoff
-defines every permitted page and pause. Never use Computer Use, Chrome, Safari,
-Edge, `open <url>`, cookies, browser storage, or account credentials.
+- Run workspace binding commands from `<current-project-root>`.
 
 ## First setup
 
 1. Run `c2c update-check --json` and `c2c sandbox-allow --json`.
 2. Ensure Node.js >= 20, Git, and `cloudflared`; build with
-   `corepack pnpm install && corepack pnpm build` when dependencies or `dist/` are absent.
+   `corepack pnpm install && corepack pnpm build` when dependencies or `dist/`
+   are absent.
 3. Run `c2c tunnel status -w <current-project-root> --json`. If `needsChoice`
-   is true, show exactly one user choice: temporary address, or their existing
-   Cloudflare domain. For a named choice, run `c2c tunnel login --json`, open
-   its emitted page in the built-in browser, pause for the user, and wait for
-   success before `c2c tunnel choose`. Persist only the selected CLI mode;
-   later account repair remains a doctor HITL action.
-4. Run `c2c doctor -w <current-project-root> --json` and dispatch its one
-   `nextAction` through `<checkout>/skill/DOCTOR-HANDOFF.md`. After every HITL
-   action, rerun doctor with the identical workspace path.
-5. For the returned conversation action, generate `SETUP_TASK_ID` as
-   `c2c_setup_` plus four random hexadecimal characters. Run
-   `c2c binding bootstrap -w <current-project-root> --task <SETUP_TASK_ID> --json`.
-   Append its raw `bootstrapToken` to the Boot Prompt from `docs/protocol.md` as
-   `WORKSPACE_BOOTSTRAP: <bootstrapToken>` and send it only to the foreground
-   C2C conversation. Require the exact Connector to call `bind_workspace` once,
-   then pass the returned `binding_token` to `workspace_info` and one top-level
-   `read_file` call. Never record or echo either credential.
-6. After both calls identify the requested workspace, run
-   `c2c binding unbind --task <SETUP_TASK_ID> --json`, then save the verified URL.
+   is true, show one user choice: temporary address or their existing
+   Cloudflare domain. For a named choice, use `c2c tunnel login --json` and the
+   built-in browser, pausing for the visible user gate before `c2c tunnel choose`.
+4. Run `c2c doctor -w <current-project-root> --direct --json`. Follow its one
+   `nextAction` through `skill/DOCTOR-HANDOFF.md`, rerunning with the same path
+   after every action until `nextAction.type` is `none`.
+5. Confirm this is a Codex project task and `CODEX_THREAD_ID` exists. Inspect
+   the current task's `@Second Opinion` schemas for `bind_workspace` with
+   `bootstrap_token`, plus `workspace_info` and `read_file` with
+   `binding_token`. If any is absent, stop with
+   `SECOND_OPINION_BINDING_TOOLS_UNAVAILABLE` and report that the Connector
+   candidate must be deployed or refreshed. Do not use a browser conversation
+   or legacy `/mcp` as a substitute.
+6. From `<current-project-root>`, run `c2c binding bootstrap --json`. Pass its
+   raw `bootstrapToken` only to `@Second Opinion.bind_workspace`, then pass the
+   returned private `binding_token` to `@Second Opinion.workspace_info` and one
+   top-level `@Second Opinion.read_file` call. Require the canonical root to
+   equal `<current-project-root>` and include the token in every routed read.
+7. Run `c2c binding unbind --json` from the same task and cwd.
 
-Completion criterion: doctor has no unfinished local or HITL stage,
-`workspace_info` names the requested workspace, and the read-only file check passes.
+Completion criterion: doctor has no unfinished action, the current Codex task
+directly verifies its canonical workspace and one file read through
+`@Second Opinion`, and the task binding is removed.
 
 ## Repair
 
-Run `c2c doctor -w <current-project-root> --json` and follow only the shared
-handoff. Do not pre-emptively start a Bridge, restart a Tunnel, generate pairing,
-or edit a Connector. Repeat from the same workspace after each completed action.
+Run `c2c doctor -w <current-project-root> --direct --json` and follow only the
+shared handoff. Do not pre-emptively start a Bridge, restart a Tunnel, generate
+pairing, or edit a Connector.
 
-Completion criterion: doctor reaches the conversation action and
-`workspace_info` confirms the requested workspace.
+## Browser C2C compatibility
+
+Legacy ChatGPT Web conversations remain available only when explicitly
+requested. Run doctor without `--direct` and follow its conversation action and
+`docs/protocol.md`. This path is not #13 direct-host acceptance. Its random C2C
+`TASK_ID` never owns a local binding; binding commands always use the current
+host `CODEX_THREAD_ID` and cwd implicitly.
 
 ## Disconnect
 
 Run `c2c unpair`. Remove the named Connector only when the user explicitly asks;
-the removal remains a visible browser action. Do not alter saved conversations.
+the removal remains a visible built-in-browser action. Do not alter saved conversations.
 
 ## Completion report
 
@@ -93,8 +79,8 @@ the removal remains a visible browser action. Do not alter saved conversations.
 Codex with ChatGPT
 
 ✓ 全局连接已建立
-✓ 当前项目已识别
-✓ ChatGPT 已连接
+✓ 当前 Codex 任务已绑定项目
+✓ @Second Opinion 已连接
 ✓ 文件读取测试通过
 
 Ready.

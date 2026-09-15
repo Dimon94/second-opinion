@@ -8,101 +8,59 @@ description: >
 
 # Run with Codex and ChatGPT
 
-ChatGPT plans and reviews. Codex executes and tests. The same global Connector
-routes each task through its locally authorized workspace binding.
+Use `@Second Opinion` inside the current Codex project task. The host task and
+its current working directory own the local read-only workspace binding.
 
 ## Required reference
 
-Before interpreting any doctor result, read `<checkout>/skill/DOCTOR-HANDOFF.md`
-completely. It is the shared `outcome` / `reason` / `nextAction` contract for
-this Skill and `codex-with-chatgpt`.
-
-Completion criterion: every doctor result is dispatched only through that
-reference; this Skill does not infer Bridge, Tunnel, endpoint, Connector, or
-grant state.
-
-## Boundary
-
-- Begin every ChatGPT turn by checking the global connection through doctor.
-- Use the saved conversation disposition returned by doctor; a conversation is not a Connector.
-- ChatGPT reads and reviews through the exact returned Connector. Codex owns edits, shell, git, and tests.
-- Keep `[C2C]` control messages below 1 KB. Never paste files, diffs, or logs into ChatGPT.
+Before interpreting doctor output, read `<checkout>/skill/DOCTOR-HANDOFF.md`.
+Dispatch only its `nextAction`; do not infer recovery state from other fields.
 
 ## Locations
 
 - The codex-with-chatgpt checkout lives at: `<ACTUAL_CHECKOUT_PATH>`
 - Let `<checkout>` mean that path. CLI:
   `node "<checkout>/bin/c2c.js" <command>` or a globally linked `c2c`.
-- Protocol: `<checkout>/docs/protocol.md`.
-- Always pass `-w <current-project-root>`.
+- Run workspace binding commands from `<current-project-root>`.
 
-## Start and resume gate
+## Direct Codex task flow
 
-1. Run `c2c sandbox-allow --json`.
-2. Run `c2c doctor -w <current-project-root> --json` and follow its one action
-   through `<checkout>/skill/DOCTOR-HANDOFF.md`. Resume every pause with that
-   same workspace path. Do not send `[C2C]` while a local or HITL action remains.
-3. For `open_conversation` or `create_conversation`, use the one foreground
-   built-in-browser tab.
-4. Read `c2c session -w <current-project-root> --json` and resume its checkpoint
-   before creating a task id or sending INIT:
-   - `EXECUTED_SENT` + `GPT_REVIEW`: wait for review; do not resend.
-   - `EXECUTED_LOCAL`: record if needed, then send only EXECUTED.
-   - `EXECUTING` or `PLAN_RECEIVED`: continue the accepted plan.
-   - `INIT` + `GPT_PLAN`: wait for the plan; do not resend.
-   - `DONE`: clear the checkpoint and finish.
-   - `BLOCKED`: surface the one unresolved decision.
+1. Confirm this is a Codex project task and `CODEX_THREAD_ID` exists. The CLI
+   rejects a missing host identity; never substitute a generated or user-supplied id.
+2. Run `c2c sandbox-allow --json`, then
+   `c2c doctor -w <current-project-root> --direct --json`. Follow its one action
+   through `skill/DOCTOR-HANDOFF.md` until `nextAction.type` is `none`.
+3. Inspect the current task's `@Second Opinion` tool schemas. They must expose:
+   - `bind_workspace` with `bootstrap_token`;
+   - `workspace_info` with `binding_token`;
+   - `read_file` with `binding_token` and `path`.
+   If any is absent, stop with `SECOND_OPINION_BINDING_TOOLS_UNAVAILABLE` and
+   report that the Connector candidate must be deployed or refreshed. Do not
+   use browser ChatGPT or legacy `/mcp` as a substitute.
+4. From `<current-project-root>`, run `c2c binding bootstrap --json`. Send the
+   raw `bootstrapToken` only to `@Second Opinion.bind_workspace`. Keep the
+   returned `binding_token` private.
+5. Call `@Second Opinion.workspace_info` with that `binding_token`. Require the
+   returned canonical root to equal `<current-project-root>`. Then call
+   `@Second Opinion.read_file` with the same token and one relevant relative
+   path. Include the token in every later `workspace_info` and `read_file` call.
+6. Codex executes and tests the user's task. Issue #13 only establishes the
+   direct workspace binding and read path; do not claim a separate advisor plan
+   or review unless the host actually returns one.
+7. On completion, run `c2c binding unbind --json` from the same task and cwd.
 
-Completion criterion: the browser is on the selected conversation and
-checkpoint recovery has selected exactly one next protocol step. The next
-outbound C2C message must carry a fresh locally minted workspace bootstrap.
+Completion criterion: the current Codex task directly calls `@Second Opinion`,
+the canonical workspace and one file read match, relevant local checks pass,
+and the task binding is removed.
 
-## Plan
+## Browser C2C compatibility
 
-Generate `TASK_ID` as `c2c_` plus four random hexadecimal characters unless the
-checkpoint already has one. Run
-`c2c binding bootstrap -w <current-project-root> --task <TASK_ID> --json`, then
-send its raw `bootstrapToken` only in this control message:
+Use this only when the user explicitly requests the legacy ChatGPT Web planning
+and review loop. It is preserved for compatibility and is not #13 acceptance.
 
-```text
-[C2C]
-STATE: INIT
-TASK_ID: <task-id>
-ITERATION: 0
-WORKSPACE_BOOTSTRAP: <bootstrap-token>
-
-GOAL:
-<user goal in one paragraph>
-
-INSTRUCTION:
-Call bind_workspace once with WORKSPACE_BOOTSTRAP. Keep its returned
-binding_token private and include it in every workspace_info and read_file call.
-If workspace_info names the expected workspace, inspect it and return a
-substantive C2C PLAN. Otherwise reply BLOCKED. Never echo either credential.
-```
-
-Persist `INIT` / `GPT_PLAN`. A valid PLAN includes rationale, concrete actions,
-likely files, tests, and success criteria. Persist `PLAN_RECEIVED` before execution.
-
-## Execute and review
-
-1. Persist `EXECUTING`; Codex executes the finite PLAN and runs relevant checks.
-2. Record changed files, tests, and sanitized command output with `c2c record`;
-   persist `EXECUTED_LOCAL` before sending the review message.
-3. Rerun `c2c doctor -w <current-project-root> --json` and follow the shared
-   handoff. Run `c2c binding bootstrap -w <current-project-root> --task <TASK_ID> --json`
-   before sending EXECUTED.
-4. Send the small `[C2C] STATE: EXECUTED` summary with
-   `WORKSPACE_BOOTSTRAP: <bootstrapToken>`. ChatGPT calls `bind_workspace`, then
-   independently reads the current diff and released test output with the
-   returned `binding_token` on every routed request. Tools not yet migrated to
-   the session entry fail closed until #14; never retry them through `/mcp`.
-   It then replies PLAN, DONE, or BLOCKED.
-5. Persist `EXECUTED_SENT` / `GPT_REVIEW`. On PLAN, run the next finite iteration.
-   On DONE, run `c2c binding unbind --task <TASK_ID> --json`, persist DONE, and
-   clear the checkpoint. On BLOCKED, surface the one user decision after fixing
-   everything safely in scope.
-6. Respect `.c2c.json` `maxIterations` (default 12); ask before continuing beyond it.
-
-Completion criterion: ChatGPT returns DONE after reviewing the verified
-workspace, local checks pass, and no second Connector or conversation was invented.
+Run `c2c doctor -w <current-project-root> --json` without `--direct`, follow the
+conversation action, then use `<checkout>/docs/protocol.md`. Its random `TASK_ID`
+is only a C2C message correlation id. The local binding owner remains the host
+`CODEX_THREAD_ID`; therefore bootstrap and cleanup still use
+`c2c binding bootstrap --json` and `c2c binding unbind --json` from the current
+task cwd. Never pass the protocol `TASK_ID` to either binding command.

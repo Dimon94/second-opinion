@@ -5,6 +5,12 @@ Data plane: MCP (ChatGPT pulls files, diffs, search results itself).
 
 Never mix the two: control messages carry state, never content.
 
+This protocol is the explicit ChatGPT Web compatibility path. Issue #13's
+default path is direct `@Second Opinion` use inside the current Codex project
+task and does not send these browser messages. `TASK_ID` below correlates C2C
+messages only. It never owns or authorizes a workspace binding; local binding
+commands derive that identity from the host `CODEX_THREAD_ID` and cwd.
+
 ## States
 
 ```
