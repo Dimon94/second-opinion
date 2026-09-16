@@ -1275,7 +1275,7 @@ describe("c2c doctor contract", () => {
         cloudflareLogin: "ready",
         publicHealth: "passed",
       },
-      nextAction: { reason: "auth_refresh_required" },
+      nextAction: { type: "refresh_oauth", reason: "auth_refresh_required" },
     });
     expect(readRuntimeState()).toEqual(runtimeBefore);
     expect(readLastEndpoint(active.id)).toEqual(endpointBefore);
@@ -1295,6 +1295,7 @@ describe("c2c doctor contract", () => {
       reason: "auth_refresh_required",
       requestedWorkspace: { id: requested.id },
       activeWorkspace: { id: active.id },
+      nextAction: { type: "refresh_oauth", reason: "auth_refresh_required" },
     });
     expect(readRuntimeState()).toEqual(runtimeBefore);
     expect(await adminFetch<{ workspaceId: string }>(runtimeBefore!, "GET", "/admin/info"))

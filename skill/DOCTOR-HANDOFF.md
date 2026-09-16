@@ -37,6 +37,7 @@ The table is normative. There is one `nextAction` per doctor result.
 | `cloudflare_login` | `built-in` | `user` | `no` | `rerun` |
 | `replace_connector` | `built-in` | `user` | `no` | `rerun` |
 | `authorize_oauth` | `built-in` | `user` | `create` | `rerun` |
+| `refresh_oauth` | `none` | `no` | `no` | `rerun` |
 | `chatgpt_login` | `built-in` | `user` | `no` | `rerun` |
 | `open_conversation` | `built-in` | `no` | `no` | `verify` |
 | `create_conversation` | `built-in` | `no` | `no` | `verify` |
@@ -63,6 +64,10 @@ The table is normative. There is one `nextAction` per doctor result.
   The CLI retains the one-time, short-TTL, attempt-limited, memory-only session.
   Open `nextAction.page`, then pause at OAuth consent. The pairing code is the
   only credential Codex may type.
+- `refresh_oauth`: direct mode only. Retry the current task's native
+  `@Second Opinion` Connector once so its OAuth client can refresh the existing
+  grant, then rerun Doctor with the same workspace. Preserve the existing
+  pairing and require Doctor to prove authorization healthy before continuing.
 - `chatgpt_login`: open `nextAction.page` and stop. The user completes login,
   MFA, CAPTCHA, or account selection.
 - `open_conversation`: browser compatibility only. Open `nextAction.page` in the existing C2C tab. If it is

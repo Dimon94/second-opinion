@@ -37,6 +37,7 @@ export type DoctorReason =
 export type DoctorNextAction =
   | { type: "none" }
   | { type: "retry_wait"; reason: DoctorReason }
+  | { type: "refresh_oauth"; reason: DoctorReason }
   | { type: "cloudflare_login"; reason: DoctorReason }
   | {
       type: "replace_connector";
@@ -309,6 +310,15 @@ export function createDoctorResult(input: {
   }
   const authorization = authorizationDisposition(input.authorization);
   if (input.authorization.state === "expired" && input.authorization.recoverable) {
+    if (input.direct) {
+      return {
+        ...base,
+        outcome: "unknown",
+        reason: "auth_refresh_required",
+        safeRetry: true,
+        nextAction: { type: "refresh_oauth", reason: "auth_refresh_required" },
+      };
+    }
     const conversation = input.conversation;
     const page = conversation?.mode === "project" ? conversation.projectUrl : conversation?.chatUrl;
     return {
