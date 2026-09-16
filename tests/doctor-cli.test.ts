@@ -689,7 +689,7 @@ describe("c2c doctor contract", () => {
       conversationMode: "long-chat",
       connectorName: "Codex with ChatGPT",
       savedAt: new Date().toISOString(),
-    });
+    }, TEST_TASK_ID);
     await first.close();
 
     const storeFile = path.join(fixture.stateDir, "auth", "store.json");
