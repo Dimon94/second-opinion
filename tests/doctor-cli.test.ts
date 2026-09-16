@@ -1178,6 +1178,129 @@ describe("c2c doctor contract", () => {
     expect(readRuntimeState(requested.id)).toEqual(active);
   });
 
+  it("diagnoses the global direct transport without activating another workspace", async () => {
+    const fixture = isolatedWorkspace("doctor-direct-cross-workspace");
+    const requestedRoot = makeTmpDir("doctor-direct-cross-workspace-target");
+    write(requestedRoot, "README.md", "target\n");
+    dirs.push(fixture.workspace, requestedRoot, fixture.stateDir, fixture.codexHome);
+    process.env.C2C_STATE_DIR = fixture.stateDir;
+    process.env.TUNNEL_ORIGIN_CERT = write(fixture.stateDir, "cloudflare-cert.pem", "fixture\n");
+    const active = new Workspace(fixture.workspace);
+    const requested = new Workspace(requestedRoot);
+    writeTunnelState({
+      workspaceId: active.id,
+      preference: "named",
+      askedAt: new Date().toISOString(),
+      provider: "cloudflare-named",
+      tunnelName: `c2c-${active.id}`,
+      hostname: "c2c-global.example.com",
+    });
+    const first = await startBridge({
+      workspaceRoot: fixture.workspace,
+      port: 0,
+      persistRuntime: true,
+      tunnelProvider: new FixtureTunnel("cloudflare-named", (port) => `http://127.0.0.1:${port}`),
+    });
+    bridges.push(first);
+    const started = await startFixtureTunnel(readRuntimeState()!);
+    const client = first.authStore.registerClient({
+      clientName: "global-direct-client",
+      redirectUris: ["https://chatgpt.com/oauth/callback"],
+      baseUrl: started.url,
+    });
+    first.authStore.issueTokens({
+      identity: first.authStore.identityForClient(
+        started.url,
+        client.clientId,
+        ["workspace.read", "offline_access"]
+      )!,
+    });
+    writeLastEndpoint({
+      workspaceId: active.id,
+      port: first.port,
+      publicUrl: started.url,
+      mcpUrl: mcpUrlFromPublic(started.url),
+      connectorName: "Second Opinion",
+    });
+    writeSession(requested.id, {
+      url: "https://chatgpt.com/c/direct-cross-workspace",
+      conversationMode: "long-chat",
+      connectorName: "Second Opinion",
+      savedAt: new Date().toISOString(),
+    }, TEST_TASK_ID);
+    await first.close();
+
+    const storeFile = path.join(fixture.stateDir, "auth", "store.json");
+    const persisted = JSON.parse(fs.readFileSync(storeFile, "utf8")) as {
+      clients: Array<{ grant: { accessExpiresAt: number } }>;
+    };
+    persisted.clients[0].grant.accessExpiresAt = 0;
+    fs.writeFileSync(storeFile, JSON.stringify(persisted));
+
+    const bridge = await startBridge({
+      workspaceRoot: fixture.workspace,
+      port: first.port,
+      persistRuntime: true,
+      tunnelProvider: new FixtureTunnel("cloudflare-named", (port) => `http://127.0.0.1:${port}`),
+    });
+    bridges.push(bridge);
+    await startFixtureTunnel(readRuntimeState()!);
+    const runtimeBefore = readRuntimeState();
+    const endpointBefore = readLastEndpoint(active.id);
+    const stateBefore = tree(fixture.stateDir);
+
+    const result = await runDoctor(
+      requestedRoot,
+      fixture.stateDir,
+      fixture.codexHome,
+      "--direct",
+      "--diagnose-only",
+      "--json"
+    );
+
+    expect(result.status).toBe(1);
+    expect(parseResult(result.stdout)).toMatchObject({
+      outcome: "unknown",
+      reason: "auth_refresh_required",
+      requestedWorkspace: {
+        id: requested.id,
+        name: requested.name,
+      },
+      activeWorkspace: { id: active.id, name: active.name },
+      bridgeObservation: { state: "healthy", reason: null },
+      authorization: { state: "expired", recoverable: true },
+      tunnel: {
+        provider: "cloudflare-named",
+        component: "available",
+        cloudflareLogin: "ready",
+        publicHealth: "passed",
+      },
+      nextAction: { reason: "auth_refresh_required" },
+    });
+    expect(readRuntimeState()).toEqual(runtimeBefore);
+    expect(readLastEndpoint(active.id)).toEqual(endpointBefore);
+    expect(tree(fixture.stateDir)).toEqual(stateBefore);
+    expect(await adminFetch<{ workspaceId: string }>(runtimeBefore!, "GET", "/admin/info"))
+      .toMatchObject({ workspaceId: active.id });
+
+    const repaired = await runDoctor(
+      requestedRoot,
+      fixture.stateDir,
+      fixture.codexHome,
+      "--direct",
+      "--json"
+    );
+    expect(repaired.status).toBe(1);
+    expect(parseResult(repaired.stdout)).toMatchObject({
+      reason: "auth_refresh_required",
+      requestedWorkspace: { id: requested.id },
+      activeWorkspace: { id: active.id },
+    });
+    expect(readRuntimeState()).toEqual(runtimeBefore);
+    expect(await adminFetch<{ workspaceId: string }>(runtimeBefore!, "GET", "/admin/info"))
+      .toMatchObject({ workspaceId: active.id });
+  });
+
   it("keeps the machine-global named tunnel while switching workspaces", async () => {
     const fixture = isolatedWorkspace("doctor-switch-named");
     const requestedRoot = makeTmpDir("doctor-switch-named-target");

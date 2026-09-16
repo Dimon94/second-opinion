@@ -672,18 +672,23 @@ program
         report.bridge = { ok: false, detail: `状态无法确认（${observation.reason}），未自动修复` };
       } else if (shouldFix && recoveryLease) {
         try {
-          const ensured = await ensureBridge(root);
-          runtime = ensured.runtime;
-          if (ensured.spawned) results.push("已自动启动 Bridge");
-          else if (ensured.activated) results.push("已激活目标 Workspace");
+          if (opts.direct && observation.state === "healthy") {
+            runtime = observation.runtime;
+          } else {
+            const ensured = await ensureBridge(root);
+            runtime = ensured.runtime;
+            if (ensured.spawned) results.push("已自动启动 Bridge");
+            else if (ensured.activated) results.push("已激活目标 Workspace");
+          }
           bridgeObservation = { state: "healthy", reason: null };
         } catch (error) {
           report.bridge = { ok: false, detail: (error as Error).message };
         }
       } else if (observation.state === "healthy") {
         if (
-          observation.runtime.workspaceId === workspace.id &&
-          observation.runtime.workspaceRoot === workspace.root
+          opts.direct ||
+          (observation.runtime.workspaceId === workspace.id &&
+            observation.runtime.workspaceRoot === workspace.root)
         ) {
           runtime = observation.runtime;
         } else {
