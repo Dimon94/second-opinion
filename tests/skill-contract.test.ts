@@ -123,5 +123,13 @@ describe("setup and run Skill doctor handoff", () => {
     expect(protocol).toContain("WORKSPACE_BOOTSTRAP:");
     expect(protocol).toMatch(/`TASK_ID` below correlates C2C\s+messages only/);
     expect(protocol).toContain("include it in every workspace_info and read_file call");
+    expect(shared).toContain("legacy_session_ambiguous");
+    expect(shared).toContain("c2c session claim-legacy");
+    expect(shared).toContain("c2c session start-new");
+    expect(shared).toContain("Retry-only");
+    expect(shared).toContain("Never clear or overwrite the previous pointer before that verification");
+    expect(protocol).toMatch(/visibly present in\s+the target chat/);
+    expect(protocol).toContain("Retry-only page is navigation failure");
+    expect(protocol).toContain("before its URL replaces the previous task URL");
   });
 });

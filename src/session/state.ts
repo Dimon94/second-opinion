@@ -1,4 +1,6 @@
 import path from "node:path";
+import { createHash } from "node:crypto";
+import fs from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
 
@@ -80,27 +82,65 @@ export interface ConversationView {
   reuseSavedChat: boolean;
 }
 
-export function sessionFile(workspaceId: string): string {
+/** hostTaskId comes from the local host, never the conversation's protocol taskId. */
+export function sessionFile(workspaceId: string, hostTaskId?: string): string {
+  if (hostTaskId !== undefined) {
+    const owner = hostTaskId.trim();
+    if (!owner || owner.length > 200) throw new Error("A valid local host task id is required.");
+    const key = createHash("sha256").update(JSON.stringify([workspaceId, owner])).digest("hex");
+    return path.join(getStateDir(), "sessions", "tasks", `${key}.json`);
+  }
   return path.join(getStateDir(), "sessions", `${workspaceId}.json`);
 }
 
-export function readSession(workspaceId: string): SavedSession | null {
-  const session = readJsonIfExists<SavedSession>(sessionFile(workspaceId));
+export function readSession(workspaceId: string, hostTaskId?: string): SavedSession | null {
+  const session = readJsonIfExists<SavedSession>(sessionFile(workspaceId, hostTaskId));
   if (!session) return null;
   const url = session.url ? normalizeConversationUrl(session.url) : null;
   return { ...session, url: url ?? undefined };
 }
 
-export function writeSession(workspaceId: string, session: SavedSession): SavedSession {
+export function writeSession(workspaceId: string, session: SavedSession, hostTaskId?: string): SavedSession {
   const url = session.url ? normalizeConversationUrl(session.url) : null;
   if (session.url && !url) throw new Error("conversation URL must look like https://chatgpt.com/c/…");
   const normalized = { ...session, url: url ?? undefined };
-  const previous = readJsonIfExists<SavedSession>(sessionFile(workspaceId));
+  const previous = readJsonIfExists<SavedSession>(sessionFile(workspaceId, hostTaskId));
   if (previous && isDeepStrictEqual(withoutUpdateTimes(previous), withoutUpdateTimes(normalized))) {
-    return readSession(workspaceId) ?? normalized;
+    return readSession(workspaceId, hostTaskId) ?? normalized;
   }
-  writeSecureJson(sessionFile(workspaceId), normalized);
+  writeSecureJson(sessionFile(workspaceId, hostTaskId), normalized);
   return normalized;
+}
+
+export function startNewTaskSession(workspaceId: string, hostTaskId: string): SavedSession {
+  const current = readSession(workspaceId, hostTaskId);
+  if (current) return current;
+  const legacy = readSession(workspaceId);
+  return writeSession(workspaceId, {
+    conversationMode: legacy?.projectUrl ? "project" : undefined,
+    projectUrl: legacy?.projectUrl,
+    connectorName: legacy?.connectorName,
+    savedAt: new Date().toISOString(),
+  }, hostTaskId);
+}
+
+export function claimLegacySession(workspaceId: string, hostTaskId: string): SavedSession | null {
+  const current = readSession(workspaceId, hostTaskId);
+  const legacy = readSession(workspaceId);
+  if (current) {
+    if (legacy && !isDeepStrictEqual(withoutUpdateTimes(current), withoutUpdateTimes(legacy))) {
+      throw new Error("this host task already has a different session");
+    }
+    if (legacy) fs.rmSync(sessionFile(workspaceId), { force: true });
+    return current;
+  }
+  if (!legacy) return null;
+  const claimed = writeSession(workspaceId, legacy, hostTaskId);
+  if (!isDeepStrictEqual(readSession(workspaceId, hostTaskId), claimed)) {
+    throw new Error("legacy session readback failed");
+  }
+  fs.rmSync(sessionFile(workspaceId), { force: true });
+  return claimed;
 }
 
 function withoutUpdateTimes(session: SavedSession): unknown {
@@ -301,8 +341,8 @@ export function mergeSession(previous: SavedSession | null, patch: SessionPatch)
 }
 
 /** Drop the current chat pointer. Keep Project binding so the collection stays. */
-export function clearChatPointer(workspaceId: string): { cleared: boolean; keptProject: boolean } {
-  const previous = readSession(workspaceId);
+export function clearChatPointer(workspaceId: string, hostTaskId?: string): { cleared: boolean; keptProject: boolean } {
+  const previous = readSession(workspaceId, hostTaskId);
   if (!previous) return { cleared: false, keptProject: false };
   const view = resolveConversation(previous);
   if (view.mode === "project" && view.projectUrl) {
@@ -312,7 +352,7 @@ export function clearChatPointer(workspaceId: string): { cleared: boolean; keptP
       conversationMode: "project",
       projectUrl: view.projectUrl,
       savedAt: new Date().toISOString(),
-    });
+    }, hostTaskId);
     return { cleared: true, keptProject: true };
   }
   writeSession(workspaceId, {
@@ -320,6 +360,6 @@ export function clearChatPointer(workspaceId: string): { cleared: boolean; keptP
     url: undefined,
     conversationMode: "long-chat",
     savedAt: new Date().toISOString(),
-  });
+  }, hostTaskId);
   return { cleared: true, keptProject: false };
 }

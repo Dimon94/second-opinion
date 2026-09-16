@@ -304,6 +304,40 @@ describe("clearChatPointer", () => {
     });
   });
 
+  it("isolates host tasks without inheriting legacy or fork checkpoints", () => {
+    const dir = makeTmpDir("session-task-isolation");
+    dirs.push(dir);
+    process.env.C2C_STATE_DIR = dir;
+    const legacy = writeSession("workspace", mergeSession(null, {
+      url: "https://chatgpt.com/c/legacy", taskId: "legacy-protocol",
+    }));
+    const legacyBytes = fs.readFileSync(sessionFile("workspace"), "utf8");
+    for (const owner of ["host-a", "host-b"]) {
+      writeSession("workspace", mergeSession(null, {
+        url: `https://chatgpt.com/c/${owner}`, taskId: `protocol-${owner}`,
+        projectUrl: PROJECT, conversationMode: "project",
+        checkpoint: { protocolState: "EXECUTED_LOCAL", waitingFor: "none" },
+      }), owner);
+    }
+    const first = readSession("workspace", "host-a")!;
+    const bytes = fs.readFileSync(sessionFile("workspace", "host-a"), "utf8");
+    writeSession("workspace", { ...first, savedAt: "2099-01-01T00:00:00.000Z" }, "host-a");
+    expect(fs.readFileSync(sessionFile("workspace", "host-a"), "utf8")).toBe(bytes);
+    expect(readSession("workspace", "host-b")).toMatchObject({
+      url: "https://chatgpt.com/c/host-b", checkpoint: { taskId: "protocol-host-b" },
+    });
+    expect(readSession("workspace", "fork-a")).toBeNull();
+    expect(readSession("other-workspace", "host-a")).toBeNull();
+    expect(() => readSession("workspace", " ")).toThrow(/task/i);
+    clearChatPointer("workspace", "host-a");
+    expect(readSession("workspace", "host-a")).toMatchObject({
+      url: undefined, projectUrl: PROJECT, checkpoint: { taskId: "protocol-host-a" },
+    });
+    expect(readSession("workspace", "host-b")?.url).toBe("https://chatgpt.com/c/host-b");
+    expect(readSession("workspace")).toEqual(legacy);
+    expect(fs.readFileSync(sessionFile("workspace"), "utf8")).toBe(legacyBytes);
+  });
+
   it("keeps repeated secure writes byte-identical and owner-only", () => {
     const dir = makeTmpDir("session-idempotent");
     dirs.push(dir);

@@ -26,6 +26,7 @@ export type DoctorReason =
   | "invalid_client"
   | "workspace_denied"
   | "conversation_missing"
+  | "legacy_session_ambiguous"
   | "cloudflare_login_required"
   | "chatgpt_login_required"
   | "administrator_approval_required"
@@ -203,6 +204,7 @@ export function createDoctorResult(input: {
   migration: LegacyMigrationResult | null;
   authorizationPage: string;
   direct?: boolean;
+  legacySessionAmbiguous?: boolean;
   tunnelFailure?: "cloudflared_missing" | "transport_down" | "probe_inconclusive";
   bridgeStopped: boolean;
   bridgeUnknown: boolean;
@@ -326,6 +328,15 @@ export function createDoctorResult(input: {
         reason,
         safeRetry: true,
         nextAction: { type: "none" },
+      };
+    }
+    if (input.legacySessionAmbiguous) {
+      return {
+        ...base,
+        outcome: "user_action_required",
+        reason: "legacy_session_ambiguous",
+        safeRetry: false,
+        nextAction: { type: "manual_recovery", reason: "legacy_session_ambiguous" },
       };
     }
     const conversation = input.conversation;

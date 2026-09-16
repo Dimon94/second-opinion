@@ -52,10 +52,12 @@ import {
 import { PRODUCT_NAME, SERVICE_NAME, VERSION } from "../version.js";
 import type { TunnelDoctorReport } from "../tunnel/provider.js";
 import {
+  claimLegacySession,
   clearChatPointer,
   mergeSession,
   readSession,
   resolveConversation,
+  startNewTaskSession,
   writeSession,
   PROTOCOL_STATES,
   WAITING_FOR,
@@ -493,6 +495,13 @@ program
     browserPage?: string;
     json: boolean;
   }) => {
+    let localTaskId: string;
+    try {
+      localTaskId = hostTaskId();
+    } catch (error) {
+      handleCliError(error, opts.json);
+      return;
+    }
     const root = resolveWorkspace(opts.workspace);
     const browserGate = opts.browserGate as DoctorBrowserGate | undefined;
     if (browserGate && browserGate !== "chatgpt_login" && browserGate !== "administrator_approval") {
@@ -869,6 +878,9 @@ program
       oauth: "OAuth",
       tunnel: "Tunnel",
     };
+    const taskSession = workspace && migration?.status !== "consent_required"
+      ? readSession(workspace.id, localTaskId)
+      : null;
     const result = applyDoctorBrowserGate(createDoctorResult({
       report,
       repairs: results,
@@ -880,15 +892,14 @@ program
       migration,
       authorizationPage: CHATGPT_PLUGINS_URL,
       direct: opts.direct,
+      legacySessionAmbiguous: Boolean(workspace && !taskSession && readSession(workspace.id)),
       tunnelFailure,
       bridgeStopped,
       bridgeUnknown,
       conversation: workspace
         ? {
             workspaceId: workspace.id,
-            ...resolveConversation(
-              migration?.status === "consent_required" ? null : readSession(workspace.id)
-            ),
+            ...resolveConversation(taskSession),
           }
         : null,
     }), browserGate, opts.browserPage);
@@ -1076,24 +1087,32 @@ session
   .option("-w, --workspace <path>")
   .option("--json", "machine-readable output", false)
   .action((opts: { workspace?: string; json: boolean }) => {
-    const workspace = new Workspace(resolveWorkspace(opts.workspace));
-    const saved = readSession(workspace.id);
-    const conversation = resolveConversation(saved);
-    if (opts.json) say(JSON.stringify({ ok: true, session: saved, conversation }));
-    else if (!saved) {
-      say("尚未记录 ChatGPT 会话。新仓库默认使用 Project 合集。");
-    } else {
-      say(`模式：${conversation.mode === "project" ? "Project 合集" : "长对话"}`);
-      if (conversation.projectUrl) say(`合集：${conversation.projectUrl}`);
-      if (saved.title) say(`会话：${saved.title}`);
-      if (saved.url) say(`对话：${saved.url}`);
-      if (saved.connectorName) say(`连接器：${saved.connectorName}`);
-      if (saved.taskId) say(`任务：${saved.taskId}（第 ${saved.iteration ?? 0} 轮，${saved.lastState ?? "?"}）`);
-      if (saved.checkpoint) {
-        say(
-          `存档：${saved.checkpoint.protocolState} / 等待 ${saved.checkpoint.waitingFor}（第 ${saved.checkpoint.iteration} 轮）`
-        );
+    try {
+      const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const taskId = hostTaskId();
+      const saved = readSession(workspace.id, taskId);
+      const conversation = resolveConversation(saved);
+      const legacyOwnership = !saved && readSession(workspace.id) ? "ambiguous" : "none";
+      if (opts.json) say(JSON.stringify({ ok: true, session: saved, conversation, legacyOwnership }));
+      else if (!saved) {
+        say(legacyOwnership === "ambiguous"
+          ? "发现旧 workspace 会话；请明确认领或为当前 task 新建会话。"
+          : "尚未记录 ChatGPT 会话。新仓库默认使用 Project 合集。");
+      } else {
+        say(`模式：${conversation.mode === "project" ? "Project 合集" : "长对话"}`);
+        if (conversation.projectUrl) say(`合集：${conversation.projectUrl}`);
+        if (saved.title) say(`会话：${saved.title}`);
+        if (saved.url) say(`对话：${saved.url}`);
+        if (saved.connectorName) say(`连接器：${saved.connectorName}`);
+        if (saved.taskId) say(`任务：${saved.taskId}（第 ${saved.iteration ?? 0} 轮，${saved.lastState ?? "?"}）`);
+        if (saved.checkpoint) {
+          say(
+            `存档：${saved.checkpoint.protocolState} / 等待 ${saved.checkpoint.waitingFor}（第 ${saved.checkpoint.iteration} 轮）`
+          );
+        }
       }
+    } catch (error) {
+      handleCliError(error, opts.json);
     }
   });
 
@@ -1136,6 +1155,7 @@ session
       clearCheckpoint: boolean;
     }) => {
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const hostOwner = hostTaskId();
       const modeRaw = opts.mode?.trim().toLowerCase();
       if (modeRaw && modeRaw !== "long-chat" && modeRaw !== "project") {
         throw new Error("mode must be long-chat or project");
@@ -1153,7 +1173,7 @@ session
       if (waitingNorm && !WAITING_FOR.includes(waitingNorm as WaitingFor)) {
         throw new Error(`waiting-for must be one of ${WAITING_FOR.join(", ")}`);
       }
-      const saved = mergeSession(readSession(workspace.id), {
+      const saved = mergeSession(readSession(workspace.id, hostOwner), {
         url: opts.url,
         title: opts.title,
         taskId: opts.task,
@@ -1174,7 +1194,7 @@ session
             }
           : undefined,
       });
-      writeSession(workspace.id, saved);
+      writeSession(workspace.id, saved, hostOwner);
       if (saved.projectUrl && saved.conversationMode === "project") {
         check("已记录 ChatGPT 合集，后续从合集页新开或复用对话");
       } else {
@@ -1189,10 +1209,43 @@ session
   .option("-w, --workspace <path>")
   .action((opts: { workspace?: string }) => {
     const workspace = new Workspace(resolveWorkspace(opts.workspace));
-    const result = clearChatPointer(workspace.id);
+    const result = clearChatPointer(workspace.id, hostTaskId());
     if (!result.cleared) say("尚未记录 ChatGPT 会话。");
     else if (result.keptProject) check("已清除当前对话，合集绑定仍保留");
     else check("已清除会话记录，下次任务将新建 ChatGPT 会话");
+  });
+
+session
+  .command("start-new")
+  .description("Start a new task session while retaining safe legacy Project metadata")
+  .option("-w, --workspace <path>")
+  .option("--json", "machine-readable output", false)
+  .action((opts: { workspace?: string; json: boolean }) => {
+    try {
+      const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const saved = startNewTaskSession(workspace.id, hostTaskId());
+      if (opts.json) say(JSON.stringify({ ok: true, session: saved }));
+      else check("已为当前 task 新建独立会话记录");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+session
+  .command("claim-legacy")
+  .description("Assign the legacy workspace session to the current host task")
+  .option("-w, --workspace <path>")
+  .option("--json", "machine-readable output", false)
+  .action((opts: { workspace?: string; json: boolean }) => {
+    try {
+      const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const saved = claimLegacySession(workspace.id, hostTaskId());
+      if (opts.json) say(JSON.stringify({ ok: true, claimed: Boolean(saved), session: saved }));
+      else if (saved) check("已将旧 workspace 会话归属到当前 task");
+      else say("没有可认领的旧 workspace 会话。");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
   });
 
 const prefsCmd = acceptUnusedWorkspaceOption(program.command("prefs"))

@@ -67,3 +67,7 @@ is only a C2C message correlation id. The local binding owner remains the host
 `CODEX_THREAD_ID`; therefore bootstrap and cleanup still use
 `c2c binding bootstrap --json` and `c2c binding unbind --json` from the current
 task cwd. Never pass the protocol `TASK_ID` to either binding command.
+The `session get/set/clear` commands also derive ownership from
+`CODEX_THREAD_ID`. If doctor reports `legacy_session_ambiguous`, follow the
+explicit claim-or-start-new action in `skill/DOCTOR-HANDOFF.md`; never assign an
+old workspace checkpoint to a new or forked task by cwd alone.

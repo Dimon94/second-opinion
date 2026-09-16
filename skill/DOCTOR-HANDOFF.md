@@ -65,7 +65,11 @@ The table is normative. There is one `nextAction` per doctor result.
   `c2c session set -w <same-workspace> --url <url>`.
 - `administrator_approval`: explain the requested approval and stop. The user or
   administrator completes it visibly.
-- `manual_recovery`: report `reason` and stop without browser or account mutation.
+- `manual_recovery`: if `reason` is `legacy_session_ambiguous`, ask whether the
+  current Codex task owns that legacy chat. On yes, run
+  `c2c session claim-legacy -w <same-workspace> --json`; on no, run
+  `c2c session start-new -w <same-workspace> --json`. Rerun doctor afterward.
+  For every other reason, report it and stop without browser or account mutation.
 
 ## Browser and resume gates
 
@@ -94,6 +98,14 @@ supported Connector CRUD API: do not invent one, reverse-engineer one, or claim
 an account mutation succeeded. Never inspect cookies, tokens, browser storage,
 passwords, or authentication codes.
 
-For a missing or deleted saved conversation, clear only its pointer with
-`c2c session clear -w <same-workspace>`, rerun doctor, and follow the returned
-conversation action. Keep Project binding and checkpoint state.
+Treat a collection or chat page that shows only Retry as a navigation failure,
+not generation or authorization evidence. Retry once in the same tab. If it
+remains Retry-only, return to the last working chat and use its on-page Project
+link before creating a replacement. Do not save a waiting checkpoint until the
+INIT, EXECUTED, or HANDOFF message is visibly present in the target chat.
+
+For a missing or deleted saved conversation, keep its saved URL, Project and
+checkpoint while opening a replacement in the retained Project (or a new Chat
+for long-chat mode). Send Boot Prompt plus HANDOFF, bind and verify
+`workspace_info`, then replace the current task's URL with `c2c session set`.
+Never clear or overwrite the previous pointer before that verification.

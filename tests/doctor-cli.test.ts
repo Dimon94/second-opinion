@@ -24,6 +24,7 @@ import { cleanup, makeTmpDir, write } from "./helpers.js";
 
 const projectRoot = path.resolve(import.meta.dirname, "..");
 const previousOriginCert = process.env.TUNNEL_ORIGIN_CERT;
+const TEST_TASK_ID = "doctor-test-task";
 
 class FixtureTunnel implements TunnelProvider {
   private running = false;
@@ -102,7 +103,12 @@ function runCli(
       ],
       {
         cwd: projectRoot,
-        env: { ...process.env, C2C_STATE_DIR: stateDir, CODEX_HOME: codexHome },
+        env: {
+          ...process.env,
+          C2C_STATE_DIR: stateDir,
+          CODEX_HOME: codexHome,
+          CODEX_THREAD_ID: TEST_TASK_ID,
+        },
         stdio: ["ignore", "pipe", "pipe"],
       }
     );
@@ -885,7 +891,7 @@ describe("c2c doctor contract", () => {
     process.env.C2C_STATE_DIR = fixture.stateDir;
     const bridge = await startBridge({ workspaceRoot: fixture.workspace, port: 0, persistRuntime: true });
     bridges.push(bridge);
-    writeSecureJson(sessionFile(bridge.workspace.id), {
+    writeSecureJson(sessionFile(bridge.workspace.id, TEST_TASK_ID), {
       url: "https://chatgpt.com/c/WEB:saved-chat?model=auto",
       conversationMode: "long-chat",
       connectorName: "Codex with ChatGPT",
@@ -919,6 +925,38 @@ describe("c2c doctor contract", () => {
     expect(bridge.pairing.hasActiveSession()).toBe(false);
   });
 
+  it("does not assign an ambiguous legacy conversation to the current host task", async () => {
+    const fixture = isolatedWorkspace("doctor-legacy-conversation");
+    dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+    process.env.C2C_STATE_DIR = fixture.stateDir;
+    const bridge = await startBridge({ workspaceRoot: fixture.workspace, port: 0, persistRuntime: true });
+    bridges.push(bridge);
+    writeSession(bridge.workspace.id, {
+      url: "https://chatgpt.com/c/legacy-chat",
+      conversationMode: "long-chat",
+      checkpoint: {
+        taskId: "legacy-protocol",
+        iteration: 2,
+        protocolState: "EXECUTED_SENT",
+        waitingFor: "GPT_REVIEW",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
+      savedAt: "2026-01-01T00:00:00.000Z",
+    });
+
+    const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
+
+    expect(result.status).toBe(2);
+    expect(parseResult(result.stdout)).toMatchObject({
+      outcome: "user_action_required",
+      reason: "legacy_session_ambiguous",
+      conversation: null,
+      nextAction: { type: "manual_recovery", reason: "legacy_session_ambiguous" },
+    });
+    expect(fs.existsSync(sessionFile(bridge.workspace.id))).toBe(true);
+    expect(fs.existsSync(sessionFile(bridge.workspace.id, TEST_TASK_ID))).toBe(false);
+  });
+
   it("opens the retained Project when its conversation is missing without changing bindings", async () => {
     const fixture = isolatedWorkspace("doctor-project-missing");
     dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
@@ -938,8 +976,8 @@ describe("c2c doctor contract", () => {
         updatedAt: "2026-01-01T00:00:00.000Z",
       },
       savedAt: "2026-01-01T00:00:00.000Z",
-    });
-    const before = fs.readFileSync(sessionFile(bridge.workspace.id), "utf8");
+    }, TEST_TASK_ID);
+    const before = fs.readFileSync(sessionFile(bridge.workspace.id, TEST_TASK_ID), "utf8");
 
     const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
 
@@ -955,7 +993,7 @@ describe("c2c doctor contract", () => {
       nextAction: { type: "open_conversation", reason: "conversation_missing", page: projectUrl },
       chatgptRepair: { needed: false, connectorAction: "none" },
     });
-    expect(fs.readFileSync(sessionFile(bridge.workspace.id), "utf8")).toBe(before);
+    expect(fs.readFileSync(sessionFile(bridge.workspace.id, TEST_TASK_ID), "utf8")).toBe(before);
   });
 
   it("activates the requested workspace without replacing the healthy global bridge", async () => {
@@ -984,8 +1022,8 @@ describe("c2c doctor contract", () => {
       url: "https://chatgpt.com/c/existing",
       conversationMode: "long-chat",
       savedAt: new Date().toISOString(),
-    });
-    const sessionBefore = fs.readFileSync(sessionFile(bridge.workspace.id), "utf8");
+    }, TEST_TASK_ID);
+    const sessionBefore = fs.readFileSync(sessionFile(bridge.workspace.id, TEST_TASK_ID), "utf8");
     const before = readRuntimeState(bridge.workspace.id);
     expect(before).not.toBeNull();
     const tokenCount = bridge.authStore.tokenCount();
@@ -1014,7 +1052,7 @@ describe("c2c doctor contract", () => {
     });
     expect(bridge.authStore.tokenCount()).toBe(tokenCount);
     expect(bridge.tunnel.status()).toEqual(tunnel);
-    expect(fs.readFileSync(sessionFile(before!.workspaceId), "utf8")).toBe(sessionBefore);
+    expect(fs.readFileSync(sessionFile(before!.workspaceId, TEST_TASK_ID), "utf8")).toBe(sessionBefore);
 
     const client = new Client({ name: "doctor-switch-client", version: "1.0.0" });
     const transport = new StreamableHTTPClientTransport(new URL(`${bridge.localBaseUrl()}/mcp`), {

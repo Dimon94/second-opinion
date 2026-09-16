@@ -49,6 +49,15 @@ Local checkpoint values (session only):
 Legacy sessions without a checkpoint keep the old loop. The first normal
 iteration after this version writes a checkpoint automatically.
 
+Session files are keyed by the verified host `CODEX_THREAD_ID` and canonical
+workspace, while `TASK_ID` remains only protocol correlation. Before sending a
+message, save `EXECUTED_LOCAL` when applicable. Save `INIT`, `EXECUTED_SENT`,
+or a HANDOFF waiting state only after that exact message is visibly present in
+the target chat. A Retry-only page is navigation failure, not proof of message
+submission or generation. A replacement chat must bind and return the expected
+`workspace_info` before its URL replaces the previous task URL; until then keep
+the previous URL, Project and checkpoint intact.
+
 Do not re-pair, recreate the connector, or rewrite Project instructions
 just to resume.
 

@@ -243,6 +243,9 @@ describe("session-routed MCP entry", () => {
       });
       expect(unbound.isError).toBe(true);
       expect(JSON.stringify(unbound)).toContain("WORKSPACE_BINDING_REQUIRED");
+      expect(data<{ workspaceId: string }>(await call(client, "session-b", "workspace_info", {
+        binding_token: boundB.binding_token,
+      })).workspaceId).toBe(infoB.workspaceId);
 
       bridge.authStore.revokeToken(accessToken);
       expect(bridge.bindings.count()).toBe(0);

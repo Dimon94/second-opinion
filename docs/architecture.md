@@ -47,6 +47,7 @@
 | `workspace/` | Canonical-path containment (realpath of deepest existing ancestor), sensitive-file policy, `.c2cignore`, paginated read/list, ripgrep search with Node fallback, git status/diff with pagination |
 | `tunnel/` | `TunnelProvider` interface + Cloudflare Quick and machine-global Named Tunnel implementations; business logic is vendor-agnostic |
 | `execution/` | JSONL execution records plus optional sanitized command output (`execution_output`) |
+| `session/` | Task workspace bindings and task-scoped conversation/checkpoint state; legacy workspace records require an explicit claim or fresh-task choice |
 | `process/` | Daemon spawn/reuse, health probing, graceful shutdown |
 | `cli/` | `c2c` commands; `--json` everywhere for the Skill |
 | `config/`, `logger/` | OS-convention state dir, secret-redacting logger |
@@ -70,6 +71,12 @@ Codex mints a short-lived bootstrap for the invoking task and canonical cwd.
 ChatGPT redeems it once and supplies the returned binding token on every routed
 request. Legacy workspace activation remains isolated for migration. Only a
 missing runtime or a positively dead PID permits a replacement process.
+
+**Conversation state**: local host task identity and canonical workspace form
+the storage key. ChatGPT URL, protocol task and checkpoint belong to that key;
+forks and same-workspace tasks do not inherit them. Legacy workspace records
+remain untouched until one task explicitly claims them, while a fresh task may
+reuse only Project/Connector metadata.
 
 **Tunnel**: a machine-global Cloudflare Named Tunnel is the recommended stable
 setup (`c2c tunnel choose --mode named`). The Skill asks before the first public
