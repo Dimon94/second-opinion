@@ -69,6 +69,7 @@ describe("setup and run Skill doctor handoff", () => {
     expect(shared).toContain("c2c tunnel login --force --json");
     expect(shared).toContain("--browser-gate chatgpt_login");
     expect(shared).toContain("--browser-gate connector_replaced");
+    expect(shared).toContain("--browser-endpoint <visible-endpoint>");
     expect(shared).toContain("built-in browser only");
     expect(shared).toContain("MFA, CAPTCHA");
     expect(shared).toContain("Never use Reconnect");

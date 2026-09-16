@@ -510,7 +510,9 @@ describe("c2c doctor contract", () => {
       "--browser-gate",
       "connector_replaced",
       "--browser-page",
-      "https://chatgpt.com/plugins"
+      "https://chatgpt.com/plugins",
+      "--browser-endpoint",
+      `${bridge.localBaseUrl()}/mcp/session`
     );
     expect(authorize.status).toBe(2);
     expect(parseResult(authorize.stdout)).toMatchObject({
@@ -1515,7 +1517,10 @@ describe("c2c doctor contract", () => {
       mcpUrl: "https://old.trycloudflare.com/mcp",
       connectorName: "Codex with ChatGPT",
     });
-    const tunnel = new FixtureTunnel("cloudflare-quick", (port) => `http://127.0.0.1:${port}`);
+    const tunnel = new FixtureTunnel(
+      "cloudflare-quick",
+      (port) => tunnel.startCalls === 1 ? `http://localhost:${port}` : `http://127.0.0.1:${port}`
+    );
     const bridge = await startBridge({
       workspaceRoot: fixture.workspace,
       port: 0,
@@ -1523,13 +1528,15 @@ describe("c2c doctor contract", () => {
       tunnelProvider: tunnel,
     });
     bridges.push(bridge);
+    const completedEndpointA = `http://localhost:${bridge.port}/mcp/session`;
+    const currentEndpointB = `${bridge.localBaseUrl()}/mcp/session`;
     const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
 
     expect(result.status).toBe(2);
     expect(parseResult(result.stdout)).toMatchObject({
       outcome: "user_action_required",
       reason: "endpoint_changed",
-      nextAction: { type: "replace_connector", endpoint: `${bridge.localBaseUrl()}/mcp/session` },
+      nextAction: { type: "replace_connector", endpoint: completedEndpointA },
       endpointIdentity: {
         changed: true,
         previousFingerprint: "sha256:0dbfbcb78cb5d5a5",
@@ -1550,7 +1557,8 @@ describe("c2c doctor contract", () => {
       mcpUrl: "https://old.trycloudflare.com/mcp",
     });
 
-    const unverified = await runDoctor(
+    await adminFetch(readRuntimeState()!, "POST", "/admin/tunnel/stop");
+    const addressChangedDuringPause = await runDoctor(
       fixture.workspace,
       fixture.stateDir,
       fixture.codexHome,
@@ -1558,22 +1566,34 @@ describe("c2c doctor contract", () => {
       "--browser-gate",
       "connector_replaced",
       "--browser-page",
-      "https://chatgpt.com/"
+      "https://chatgpt.com/plugins",
+      "--browser-endpoint",
+      completedEndpointA
     );
-    expect(parseResult(unverified.stdout)).toMatchObject({
-      outcome: "blocked",
-      reason: "checks_failed",
-      nextAction: { type: "manual_recovery", reason: "checks_failed" },
+    expect(parseResult(addressChangedDuringPause.stdout)).toMatchObject({
+      outcome: "user_action_required",
+      reason: "endpoint_changed",
+      nextAction: { type: "replace_connector", endpoint: currentEndpointB },
     });
+    expect(tunnel.startCalls).toBe(2);
     expect(readLastEndpoint(workspace.id)).toMatchObject({
       mcpUrl: "https://old.trycloudflare.com/mcp",
     });
 
-    const retry = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
-    expect(parseResult(retry.stdout)).toMatchObject({
+    const missingEndpoint = await runDoctor(
+      fixture.workspace,
+      fixture.stateDir,
+      fixture.codexHome,
+      "--json",
+      "--browser-gate",
+      "connector_replaced",
+      "--browser-page",
+      "https://chatgpt.com/plugins"
+    );
+    expect(parseResult(missingEndpoint.stdout)).toMatchObject({
       outcome: "user_action_required",
       reason: "endpoint_changed",
-      nextAction: { type: "replace_connector", endpoint: `${bridge.localBaseUrl()}/mcp/session` },
+      nextAction: { type: "replace_connector", endpoint: currentEndpointB },
     });
     expect(readLastEndpoint(workspace.id)).toMatchObject({
       mcpUrl: "https://old.trycloudflare.com/mcp",
@@ -1587,7 +1607,9 @@ describe("c2c doctor contract", () => {
       "--browser-gate",
       "connector_replaced",
       "--browser-page",
-      "https://chatgpt.com/plugins"
+      "https://chatgpt.com/plugins",
+      "--browser-endpoint",
+      `${currentEndpointB}/`
     );
     expect(parseResult(completed.stdout)).toMatchObject({
       outcome: "user_action_required",

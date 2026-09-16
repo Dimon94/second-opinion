@@ -1,7 +1,7 @@
 import type { ConversationView } from "../session/state.js";
 import type { AuthorizationStatus } from "../auth/store.js";
 import type { LegacyMigrationResult } from "../config/legacy-migration.js";
-import { DEFAULT_CONNECTOR_NAME } from "../config/endpoint.js";
+import { DEFAULT_CONNECTOR_NAME, normalizePublicUrl } from "../config/endpoint.js";
 
 export const DOCTOR_CONTRACT_VERSION = 1 as const;
 
@@ -417,10 +417,19 @@ function safeChatgptPage(page?: string): string | undefined {
 
 export function observedConnectorReplacement(
   gate?: DoctorBrowserGate,
-  page?: string
+  page?: string,
+  observedEndpoint?: string,
+  currentEndpoint?: string | null
 ): boolean {
   const safePage = safeChatgptPage(page);
-  return gate === "connector_replaced" && Boolean(safePage && new URL(safePage).pathname === "/plugins");
+  if (
+    gate !== "connector_replaced" ||
+    !safePage ||
+    new URL(safePage).pathname !== "/plugins" ||
+    !observedEndpoint ||
+    !currentEndpoint
+  ) return false;
+  return normalizePublicUrl(observedEndpoint) === normalizePublicUrl(currentEndpoint);
 }
 
 /** Convert an observed ChatGPT browser interruption into the same one-action doctor contract. */
@@ -438,7 +447,10 @@ export function applyDoctorBrowserGate(
     return result;
   }
   const safePage = safeChatgptPage(page);
-  if (!safePage || (gate === "connector_replaced" && !observedConnectorReplacement(gate, page))) {
+  if (
+    !safePage ||
+    (gate === "connector_replaced" && new URL(safePage).pathname !== "/plugins")
+  ) {
     return {
       ...result,
       outcome: "blocked",

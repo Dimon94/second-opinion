@@ -512,6 +512,7 @@ program
     "observed ChatGPT gate: connector_replaced, chatgpt_login, or administrator_approval"
   )
   .option("--browser-page <url>", "current ChatGPT page for an observed browser gate")
+  .option("--browser-endpoint <url>", "endpoint visibly present in the Connector browser page")
   .option("--json", "machine-readable output", false)
   .action(async (opts: {
     workspace?: string;
@@ -521,6 +522,7 @@ program
     direct: boolean;
     browserGate?: string;
     browserPage?: string;
+    browserEndpoint?: string;
     json: boolean;
   }) => {
     let localTaskId: string;
@@ -834,7 +836,7 @@ program
           action !== "none" &&
           shouldFix &&
           Boolean(recoveryLease) &&
-          observedConnectorReplacement(browserGate, opts.browserPage);
+          observedConnectorReplacement(browserGate, opts.browserPage, opts.browserEndpoint, nextMcp);
         const boundName = nextMcp && shouldFix && recoveryLease &&
           (action === "none" || connectorReplacementCompleted)
           ? persistWorkspaceEndpoint({
