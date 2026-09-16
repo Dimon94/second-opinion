@@ -41,7 +41,7 @@
 | Module | Responsibility |
 | --- | --- |
 | `bridge/` | Express app assembly, loopback-only listener, port fallback, runtime state, admin API |
-| `mcp/` | Session-routed McpServer with `workspace_info` and `read_file`; legacy 9-tool entry remains isolated until #14; stateless Streamable HTTP transport |
+| `mcp/` | Session-routed McpServer with all nine read-only workspace tools; legacy `/mcp` stays isolated and is never a routing fallback; stateless Streamable HTTP transport |
 | `auth/` | OAuth 2.1 authorization server: discovery metadata (RFC 8414 + Protected Resource Metadata), dynamic client registration (RFC 7591), authorization-code + PKCE (S256 only), refresh rotation, revocation (RFC 7009). Opaque tokens stored as SHA-256 hashes |
 | `pairing/` | PairingCode lifecycle: CSPRNG generation, TTL, attempt limits, IP rate limit, one-time use |
 | `workspace/` | Canonical-path containment (realpath of deepest existing ancestor), sensitive-file policy, `.c2cignore`, paginated read/list, ripgrep search with Node fallback, git status/diff with pagination |
@@ -90,3 +90,8 @@ rotating the ChatGPT connector. Quick Tunnel (`cloudflared tunnel --url …`) is
 the no-domain fallback; its URL changes per start, so doctor tells the Skill to
 delete and recreate the machine-global **Second Opinion** connector before a new
 OAuth authorization.
+
+Set `C2C_TUNNEL_PROTOCOL=auto`, `quic`, or `http2` before starting Doctor or the
+Bridge to pass that transport choice to both Named and Quick Tunnel processes.
+An unset value preserves cloudflared's default; an invalid value stops startup
+instead of silently changing the configured transport or public identity.

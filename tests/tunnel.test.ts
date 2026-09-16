@@ -25,6 +25,7 @@ import {
   provisionNamedTunnel,
   type CloudflaredAccount,
 } from "../src/tunnel/named-provision.js";
+import { resolveTunnelProtocol, tunnelProtocolArgs } from "../src/tunnel/protocol.js";
 import { isNamedTunnelReady, needsTunnelChoice, readTunnelState } from "../src/tunnel/state.js";
 import { cleanup, isolateStateDir, makeTmpDir, write } from "./helpers.js";
 
@@ -67,6 +68,7 @@ function healthResponse(): Response {
 }
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   while (stateDirs.length) cleanup(stateDirs.pop()!);
   if (previousStateDir === undefined) delete process.env.C2C_STATE_DIR;
   else process.env.C2C_STATE_DIR = previousStateDir;
@@ -124,6 +126,21 @@ describe("CloudflaredQuickTunnel", () => {
       signal: expect.any(AbortSignal),
     });
     expect(tunnel.status()).toMatchObject({ running: true, url: QUICK_URL });
+    await tunnel.stop();
+  });
+
+  it("passes the configured protocol to cloudflared", async () => {
+    vi.stubEnv("C2C_TUNNEL_PROTOCOL", "http2");
+    const { child, spawnImpl, tunnel } = setupTunnel(async () => healthResponse());
+    const starting = tunnel.start(3333);
+    announceUrl(child);
+
+    await expect(starting).resolves.toBe(QUICK_URL);
+    expect(spawnImpl).toHaveBeenCalledWith(
+      "cloudflared",
+      ["tunnel", "--url", "http://127.0.0.1:3333", "--no-autoupdate", "--protocol", "http2"],
+      { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }
+    );
     await tunnel.stop();
   });
 
@@ -240,6 +257,21 @@ describe("CloudflaredQuickTunnel restart", () => {
   });
 });
 
+describe("tunnel transport protocol", () => {
+  it("keeps the default when unset and validates configured values", () => {
+    expect(resolveTunnelProtocol({})).toBeNull();
+    expect(resolveTunnelProtocol({ C2C_TUNNEL_PROTOCOL: "  " })).toBeNull();
+    expect(resolveTunnelProtocol({ C2C_TUNNEL_PROTOCOL: "HTTP2" })).toBe("http2");
+    expect(resolveTunnelProtocol({ C2C_TUNNEL_PROTOCOL: " quic " })).toBe("quic");
+    expect(resolveTunnelProtocol({ C2C_TUNNEL_PROTOCOL: "auto" })).toBe("auto");
+    expect(tunnelProtocolArgs(null)).toEqual([]);
+    expect(tunnelProtocolArgs("http2")).toEqual(["--protocol", "http2"]);
+    expect(() => resolveTunnelProtocol({ C2C_TUNNEL_PROTOCOL: "tcp" })).toThrow(
+      /C2C_TUNNEL_PROTOCOL must be one of auto, quic, http2/
+    );
+  });
+});
+
 describe("normalizeNamedTunnelHostname", () => {
   it("normalizes a valid hostname", () => {
     expect(normalizeNamedTunnelHostname("Dev.GetRemi.xyz.")).toBe("dev.getremi.xyz");
@@ -252,6 +284,35 @@ describe("normalizeNamedTunnelHostname", () => {
 });
 
 describe("CloudflaredNamedTunnel", () => {
+  it.runIf(process.platform !== "win32")(
+    "passes the configured protocol without changing the named hostname",
+    async () => {
+      vi.stubEnv("C2C_TUNNEL_PROTOCOL", "quic");
+      const dir = makeTmpDir("named-tunnel-protocol");
+      stateDirs.push(dir);
+      const argsFile = path.join(dir, "args.json");
+      const binary = write(
+        dir,
+        "cloudflared-fixture",
+        `#!/usr/bin/env node\nimport { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(argsFile)}, JSON.stringify(process.argv.slice(2)));\nprocess.stderr.write("INF Registered tunnel connection\\n");\nsetInterval(() => {}, 1000);\n`
+      );
+      fs.chmodSync(binary, 0o700);
+      const tunnel = new CloudflaredNamedTunnel({
+        tunnelName: "c2c-workspace",
+        hostname: "c2c-demo.example.com",
+        binaryOverride: binary,
+        startTimeoutMs: 2000,
+      });
+
+      expect(await tunnel.start(48765)).toBe("https://c2c-demo.example.com");
+      expect(JSON.parse(fs.readFileSync(argsFile, "utf8"))).toEqual([
+        "tunnel", "--no-autoupdate", "--url", "http://127.0.0.1:48765",
+        "--protocol", "quic", "run", "c2c-workspace",
+      ]);
+      await tunnel.stop();
+    }
+  );
+
   it.runIf(process.platform !== "win32")(
     "keeps the configured hostname when the connector process restarts",
     async () => {
