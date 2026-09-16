@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { startBridge } from "../bridge/server.js";
 import { findBridgeObservation, findLiveBridge, type RuntimeState } from "../bridge/runtime.js";
 import { adminFetch, bridgeSupportsRecovery, ensureBridge, stopBridge } from "../process/daemon.js";
-import { Workspace } from "../workspace/manager.js";
+import { Workspace, workspacePathReference } from "../workspace/manager.js";
 import { AuthStore, type AuthorizationStatus } from "../auth/store.js";
 import { detectTunnelBinaries } from "../tunnel/detect.js";
 import {
@@ -83,6 +83,7 @@ import {
   type DoctorTunnelResult,
   type DoctorBrowserGate,
   type DoctorBridgeObservation,
+  type DoctorRequestedWorkspaceIdentity,
   type DoctorWorkspaceIdentity,
 } from "../doctor/result.js";
 import { acquireRecoveryLease, type RecoveryLeaseHandle } from "../doctor/lease.js";
@@ -101,6 +102,15 @@ function resolveWorkspace(option?: string): string {
 
 function doctorWorkspaceIdentity(workspace: Workspace): DoctorWorkspaceIdentity {
   return { id: workspace.id, name: workspace.name };
+}
+
+function doctorRequestedWorkspaceIdentity(
+  root: string,
+  workspace: Workspace | null
+): DoctorRequestedWorkspaceIdentity {
+  return workspace
+    ? { ...doctorWorkspaceIdentity(workspace), reference: workspace.id }
+    : { id: null, name: null, reference: workspacePathReference(root) };
 }
 
 function doctorRuntimeWorkspaceIdentity(runtime: RuntimeState): DoctorWorkspaceIdentity {
@@ -551,7 +561,7 @@ program
               plugins: CHATGPT_PLUGINS_URL,
               createConnector: CHATGPT_CREATE_CONNECTOR_URL,
             },
-            doctorWorkspaceIdentity(requested)
+            doctorRequestedWorkspaceIdentity(root, requested)
           );
           process.exitCode = DOCTOR_EXIT_STATUS[result.outcome];
           say(
@@ -625,9 +635,7 @@ program
       report.workspace = { ok: false, detail: (error as Error).message };
     }
 
-    const requestedWorkspace = workspace
-      ? doctorWorkspaceIdentity(workspace)
-      : { id: null, name: null };
+    const requestedWorkspace = doctorRequestedWorkspaceIdentity(root, workspace);
 
     // Bridge
     recoveryLease?.updatePhase("bridge");

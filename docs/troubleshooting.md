@@ -18,7 +18,9 @@ Tunnel, OAuth, session, lease, or endpoint state. JSON always contains
 `version`, `outcome`, stable `reason`, `repairs`, `safeRetry`, and exactly one
 structured `nextAction`, plus `requestedWorkspace`, `activeWorkspace` when
 known, and `bridgeObservation`. Workspace identities contain only `id` and
-`name`, never filesystem roots. The legacy `report`, `chatgptRepair`, and
+`name`, never filesystem roots. `requestedWorkspace.reference` equals the
+canonical `id` after validation; invalid requests instead receive a stable,
+path-free reference while `id` and `name` remain `null`. The legacy `report`, `chatgptRepair`, and
 `namedRepair` fields remain available for existing callers.
 
 | Outcome | Exit status | Meaning |

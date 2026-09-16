@@ -96,6 +96,10 @@ export interface DoctorWorkspaceIdentity {
   name: string | null;
 }
 
+export interface DoctorRequestedWorkspaceIdentity extends DoctorWorkspaceIdentity {
+  reference: string;
+}
+
 export interface DoctorBridgeObservation {
   state: "healthy" | "stopped" | "unknown" | "not_checked";
   reason: "runtime_missing" | "pid_missing" | "probe_failed" | "pid_unknown" | "workspace_mismatch" | null;
@@ -133,7 +137,7 @@ export interface DoctorResult {
   repairs: string[];
   safeRetry: boolean;
   nextAction: DoctorNextAction;
-  requestedWorkspace: DoctorWorkspaceIdentity;
+  requestedWorkspace: DoctorRequestedWorkspaceIdentity;
   activeWorkspace: DoctorWorkspaceIdentity | null;
   bridgeObservation: DoctorBridgeObservation;
   conversation: DoctorConversationDisposition | null;
@@ -164,7 +168,7 @@ export function createRecoveryLeaseDoctorResult(
   status: "busy" | "unknown",
   detail: string,
   pages: DoctorChatgptRepair["pages"],
-  requestedWorkspace: DoctorWorkspaceIdentity
+  requestedWorkspace: DoctorRequestedWorkspaceIdentity
 ): DoctorResult {
   const reason: DoctorReason = status === "busy" ? "recovery_in_progress" : "probe_inconclusive";
   return {
@@ -225,7 +229,7 @@ export function createDoctorResult(input: {
   tunnelFailure?: "cloudflared_missing" | "transport_down" | "probe_inconclusive";
   bridgeStopped: boolean;
   bridgeUnknown: boolean;
-  requestedWorkspace: DoctorWorkspaceIdentity;
+  requestedWorkspace: DoctorRequestedWorkspaceIdentity;
   activeWorkspace: DoctorWorkspaceIdentity | null;
   bridgeObservation: DoctorBridgeObservation;
 }): DoctorResult {

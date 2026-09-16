@@ -28,6 +28,11 @@ export class WorkspaceError extends Error {
 const CASE_INSENSITIVE = process.platform === "win32" || process.platform === "darwin";
 const normCase = (p: string): string => (CASE_INSENSITIVE ? p.toLowerCase() : p);
 
+/** Path-free stable reference. Callers must not treat it as proof that the path is a valid workspace. */
+export function workspacePathReference(rootInput: string): string {
+  return createHash("sha256").update(normCase(path.resolve(rootInput))).digest("hex").slice(0, 12);
+}
+
 export interface ReadFileResult {
   path: string;
   sizeBytes: number;
@@ -100,7 +105,7 @@ export class Workspace {
       throw new WorkspaceError("NOT_A_DIRECTORY", `Workspace root is not a directory: ${rootInput}`);
     }
     this.root = real;
-    this.id = createHash("sha256").update(normCase(real)).digest("hex").slice(0, 12);
+    this.id = workspacePathReference(real);
     this.ignoreRules = new IgnoreRules(real);
     this.projectConfig = parseProjectConfig(readJsonIfExists<unknown>(path.join(real, ".c2c.json")));
     this.name = this.projectConfig.name ?? path.basename(real);

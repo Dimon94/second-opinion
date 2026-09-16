@@ -302,7 +302,11 @@ describe("c2c doctor contract", () => {
       outcome: "repaired",
       reason: "local_repairs_completed",
       safeRetry: true,
-      requestedWorkspace: { id: bridge.workspace.id, name: bridge.workspace.name },
+      requestedWorkspace: {
+        id: bridge.workspace.id,
+        name: bridge.workspace.name,
+        reference: bridge.workspace.id,
+      },
       activeWorkspace: { id: bridge.workspace.id, name: bridge.workspace.name },
       bridgeObservation: { state: "healthy", reason: null },
       nextAction: { type: "create_conversation", reason: "conversation_missing" },
@@ -346,10 +350,11 @@ describe("c2c doctor contract", () => {
     });
   });
 
-  it("keeps an invalid requested workspace structured without inventing an identity", async () => {
+  it("gives invalid workspace requests distinct path-free references without canonical identities", async () => {
     const fixture = isolatedWorkspace("doctor-invalid-workspace");
     dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
     const missing = path.join(fixture.workspace, "missing");
+    const otherMissing = path.join(fixture.workspace, "other-missing");
 
     const result = await runDoctor(
       missing,
@@ -358,13 +363,39 @@ describe("c2c doctor contract", () => {
       "--diagnose-only",
       "--json"
     );
+    const other = await runDoctor(
+      otherMissing,
+      fixture.stateDir,
+      fixture.codexHome,
+      "--diagnose-only",
+      "--json"
+    );
 
     expect(result.status).toBe(1);
-    expect(parseResult(result.stdout)).toMatchObject({
-      requestedWorkspace: { id: null, name: null },
+    expect(other.status).toBe(1);
+    const parsed = parseResult(result.stdout);
+    const otherParsed = parseResult(other.stdout);
+    expect(parsed).toMatchObject({
+      requestedWorkspace: {
+        id: null,
+        name: null,
+        reference: expect.stringMatching(/^[a-f0-9]{12}$/),
+      },
       activeWorkspace: null,
       bridgeObservation: { state: "not_checked", reason: null },
     });
+    expect(otherParsed).toMatchObject({
+      requestedWorkspace: {
+        id: null,
+        name: null,
+        reference: expect.stringMatching(/^[a-f0-9]{12}$/),
+      },
+    });
+    expect(
+      (parsed.requestedWorkspace as { reference: string }).reference
+    ).not.toBe((otherParsed.requestedWorkspace as { reference: string }).reference);
+    expect((parsed.requestedWorkspace as Record<string, unknown>)).not.toHaveProperty("root");
+    expect((otherParsed.requestedWorkspace as Record<string, unknown>)).not.toHaveProperty("root");
   });
 
   it("replaces a healthy bridge without auth-reload capability before migrating", async () => {
