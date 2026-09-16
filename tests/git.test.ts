@@ -56,6 +56,64 @@ describe("gitStatus", () => {
     git(repo, "reset", "staged.txt");
     git(repo, "checkout", "--", "hello.txt");
   });
+
+  it("hides sensitive paths and counts hidden changes", () => {
+    write(repo, ".c2cignore", "private-notes/\n");
+    write(repo, ".env", "SECRET_KEY=hidden\n");
+    write(repo, "private-notes/secret.md", "hidden notes\n");
+    write(repo, "visible.txt", "visible\n");
+
+    const status = gitStatus(repo);
+    expect(status.untracked).toContain("visible.txt");
+    expect(status.untracked).not.toContain(".env");
+    expect(status.untracked).not.toContain("private-notes/secret.md");
+    expect(status.hidden.changes).toBeGreaterThanOrEqual(2);
+    expect(status.hidden.conflicts).toBe(0);
+  });
+
+  it("hides a rename when either side is sensitive", () => {
+    const renameRepo = makeTmpDir("git-status-rename");
+    try {
+      makeGitRepo(renameRepo);
+      write(renameRepo, ".npmrc", "//registry/:_authToken=hidden\n");
+      git(renameRepo, "add", "-f", ".npmrc");
+      git(renameRepo, "commit", "-m", "secret baseline");
+      git(renameRepo, "mv", ".npmrc", "visible-name.txt");
+
+      const status = gitStatus(renameRepo);
+      expect(JSON.stringify(status)).not.toContain(".npmrc");
+      expect(JSON.stringify(status)).not.toContain("visible-name.txt");
+      expect(status.hidden.changes).toBe(1);
+    } finally {
+      cleanup(renameRepo);
+    }
+  });
+
+  it("counts a hidden conflict without exposing its path", () => {
+    const conflictRepo = makeTmpDir("git-status-conflict");
+    try {
+      makeGitRepo(conflictRepo);
+      write(conflictRepo, ".env.local", "VALUE=base\n");
+      git(conflictRepo, "add", "-f", ".env.local");
+      git(conflictRepo, "commit", "-m", "secret baseline");
+      git(conflictRepo, "switch", "-c", "other");
+      write(conflictRepo, ".env.local", "VALUE=other\n");
+      git(conflictRepo, "add", "-f", ".env.local");
+      git(conflictRepo, "commit", "-m", "other secret");
+      git(conflictRepo, "switch", "main");
+      write(conflictRepo, ".env.local", "VALUE=main\n");
+      git(conflictRepo, "add", "-f", ".env.local");
+      git(conflictRepo, "commit", "-m", "main secret");
+      expect(() => git(conflictRepo, "merge", "other")).toThrow();
+
+      const status = gitStatus(conflictRepo);
+      expect(JSON.stringify(status)).not.toContain(".env.local");
+      expect(status.conflicted).toEqual([]);
+      expect(status.hidden.conflicts).toBe(1);
+    } finally {
+      cleanup(conflictRepo);
+    }
+  });
 });
 
 describe("gitDiff pagination", () => {

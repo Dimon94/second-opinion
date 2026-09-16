@@ -6,6 +6,7 @@ import { searchWorkspace } from "../workspace/search.js";
 import { gitDiff, gitInfo, gitStatus, type DiffMode } from "../workspace/git.js";
 import { executionRecordSchema, latestExecutionRecord, readExecutionRecords } from "../execution/records.js";
 import { listExecutionOutputs, readExecutionOutput } from "../execution/output.js";
+import { WorkspaceBindingError } from "../session/bindings.js";
 import type { Logger } from "../logger/index.js";
 import { PRODUCT_NAME, VERSION } from "../version.js";
 
@@ -35,6 +36,7 @@ function fail(code: string, message: string): ToolResult {
 }
 
 function mapError(error: unknown): ToolResult {
+  if (error instanceof WorkspaceBindingError) return fail(error.code, error.message);
   if (error instanceof WorkspaceError) return fail(error.code, error.message);
   return fail("INTERNAL_ERROR", error instanceof Error ? error.message : String(error));
 }
@@ -122,6 +124,10 @@ const gitStatusOutputSchema = {
   unstaged: z.array(gitChangeOutputSchema),
   untracked: z.array(z.string()),
   conflicted: z.array(z.string()),
+  hidden: z.object({
+    changes: z.number().int().nonnegative(),
+    conflicts: z.number().int().nonnegative(),
+  }),
 };
 
 const gitDiffOutputSchema = {
@@ -180,12 +186,29 @@ export interface McpContext {
   logger: Logger;
 }
 
+export type WorkspaceResolver = (
+  bindingToken: string,
+  extra: { authInfo?: AuthInfo; _meta?: Record<string, unknown> }
+) => Workspace;
+
 export function createMcpServer(ctx: McpContext): McpServer {
-  const { workspace } = ctx;
   const server = new McpServer(
     { name: PRODUCT_NAME, version: VERSION },
     { capabilities: { tools: {} }, instructions: UNTRUSTED_NOTE }
   );
+  registerWorkspaceTools(server, ctx.workspace);
+  return server;
+}
+
+export function registerWorkspaceTools(server: McpServer, source: Workspace | WorkspaceResolver): void {
+  const input = <T extends z.ZodRawShape>(shape: T) => ({
+    ...shape,
+    ...(typeof source === "function" ? { binding_token: z.string().max(128).optional() } : {}),
+  }) as T & { binding_token: z.ZodOptional<z.ZodString> };
+  const workspaceFor = (
+    args: { binding_token?: string },
+    extra: { authInfo?: AuthInfo; _meta?: Record<string, unknown> }
+  ) => typeof source === "function" ? source(args.binding_token ?? "", extra) : source;
 
   server.registerTool(
     "workspace_info",
@@ -194,14 +217,15 @@ export function createMcpServer(ctx: McpContext): McpServer {
       description:
         `Get an overview of the connected workspace: identity, project type, languages, ` +
         `frameworks, git state and available scripts. Call this first. ${UNTRUSTED_NOTE}`,
-      inputSchema: {},
+      inputSchema: input({}),
       outputSchema: workspaceInfoOutputSchema,
       annotations: { readOnlyHint: true },
     },
-    async (_args, extra) => {
+    async (args, extra) => {
       const denied = requireScope(extra.authInfo, "workspace.read");
       if (denied) return denied;
       try {
+        const workspace = workspaceFor(args, extra);
         const project = workspace.detectProject();
         const git = gitInfo(workspace.root);
         return okStructured({
@@ -229,12 +253,12 @@ export function createMcpServer(ctx: McpContext): McpServer {
       description:
         `List files and directories under a workspace-relative path. High-noise directories ` +
         `(node_modules, .git, build output) are omitted. Supports pagination. ${UNTRUSTED_NOTE}`,
-      inputSchema: {
+      inputSchema: input({
         path: z.string().default(".").describe("Workspace-relative path, e.g. 'src'"),
         depth: z.number().int().min(1).max(4).default(1).describe("Recursion depth (1-4)"),
         limit: z.number().int().min(1).max(1000).default(200),
         offset: z.number().int().min(0).default(0),
-      },
+      }),
       outputSchema: listDirectoryOutputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -242,6 +266,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       const denied = requireScope(extra.authInfo, "workspace.read");
       if (denied) return denied;
       try {
+        const workspace = workspaceFor(args, extra);
         return okStructured(await workspace.listDirectory(args.path, args));
       } catch (error) {
         return mapError(error);
@@ -257,11 +282,11 @@ export function createMcpServer(ctx: McpContext): McpServer {
         `Read a text file from the workspace with line-range pagination. Defaults to the first ` +
         `400 lines; use start_line/end_line to page through large files. Sensitive files ` +
         `(.env, keys, credentials) are always denied. ${UNTRUSTED_NOTE}`,
-      inputSchema: {
+      inputSchema: input({
         path: z.string().describe("Workspace-relative file path"),
         start_line: z.number().int().min(1).optional().describe("1-based first line to return"),
         end_line: z.number().int().min(1).optional().describe("1-based last line to return"),
-      },
+      }),
       outputSchema: readFileOutputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -269,6 +294,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       const denied = requireScope(extra.authInfo, "workspace.read");
       if (denied) return denied;
       try {
+        const workspace = workspaceFor(args, extra);
         return okStructured(await workspace.readFile(args.path, { startLine: args.start_line, endLine: args.end_line }));
       } catch (error) {
         return mapError(error);
@@ -283,13 +309,13 @@ export function createMcpServer(ctx: McpContext): McpServer {
       description:
         `Search file contents across the workspace (ripgrep when available). Returns matching ` +
         `lines with file paths and line numbers. ${UNTRUSTED_NOTE}`,
-      inputSchema: {
+      inputSchema: input({
         query: z.string().min(2).describe("Text to search for (literal by default)"),
         path: z.string().optional().describe("Restrict search to this workspace-relative path"),
         glob: z.string().optional().describe("Filename glob filter, e.g. '*.ts'"),
         limit: z.number().int().min(1).max(200).default(50),
         regex: z.boolean().default(false).describe("Treat query as a regular expression"),
-      },
+      }),
       outputSchema: searchWorkspaceOutputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -297,6 +323,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       const denied = requireScope(extra.authInfo, "workspace.search");
       if (denied) return denied;
       try {
+        const workspace = workspaceFor(args, extra);
         return okStructured(await searchWorkspace(workspace, args));
       } catch (error) {
         return mapError(error);
@@ -309,15 +336,16 @@ export function createMcpServer(ctx: McpContext): McpServer {
     {
       title: "Git status",
       description: `Structured git status of the workspace: branch, staged/unstaged/untracked files. ${UNTRUSTED_NOTE}`,
-      inputSchema: {},
+      inputSchema: input({}),
       outputSchema: gitStatusOutputSchema,
       annotations: { readOnlyHint: true },
     },
-    async (_args, extra) => {
+    async (args, extra) => {
       const denied = requireScope(extra.authInfo, "git.read");
       if (denied) return denied;
       try {
-        return okStructured(gitStatus(workspace.root));
+        const workspace = workspaceFor(args, extra);
+        return okStructured(gitStatus(workspace));
       } catch (error) {
         return mapError(error);
       }
@@ -331,12 +359,12 @@ export function createMcpServer(ctx: McpContext): McpServer {
       description:
         `Git diff with byte-offset pagination. mode: 'unstaged' (default), 'staged', or 'head' ` +
         `(working tree vs HEAD). When hasMore is true, call again with offset=nextOffset. ${UNTRUSTED_NOTE}`,
-      inputSchema: {
+      inputSchema: input({
         mode: z.enum(["unstaged", "staged", "head"]).default("unstaged"),
         path: z.string().optional().describe("Limit the diff to one workspace-relative path"),
         offset: z.number().int().min(0).default(0).describe("Byte offset for pagination"),
         max_bytes: z.number().int().min(1024).max(262144).default(65536),
-      },
+      }),
       outputSchema: gitDiffOutputSchema,
       annotations: { readOnlyHint: true },
     },
@@ -344,6 +372,7 @@ export function createMcpServer(ctx: McpContext): McpServer {
       const denied = requireScope(extra.authInfo, "git.read");
       if (denied) return denied;
       try {
+        const workspace = workspaceFor(args, extra);
         let relPath: string | undefined;
         if (args.path) {
           relPath = workspace.resolve(args.path).rel;
@@ -368,27 +397,32 @@ export function createMcpServer(ctx: McpContext): McpServer {
       description:
         `Summary of the most recent test run reported by the Codex harness. This does NOT run ` +
         `tests; it reads the latest execution record. ${UNTRUSTED_NOTE}`,
-      inputSchema: {},
+      inputSchema: input({}),
       outputSchema: testStatusOutputSchema,
       annotations: { readOnlyHint: true },
     },
-    async (_args, extra) => {
+    async (args, extra) => {
       const denied = requireScope(extra.authInfo, "execution.read");
       if (denied) return denied;
-      const latest = latestExecutionRecord(workspace.id);
-      if (!latest) {
-        return okStructured({ available: false, message: "No execution records yet for this workspace." });
+      try {
+        const workspace = workspaceFor(args, extra);
+        const latest = latestExecutionRecord(workspace.id);
+        if (!latest) {
+          return okStructured({ available: false, message: "No execution records yet for this workspace." });
+        }
+        return okStructured({
+          available: true,
+          taskId: latest.taskId,
+          iteration: latest.iteration,
+          tests: latest.tests,
+          exitStatus: latest.exitStatus,
+          timestamp: latest.timestamp,
+          outputAvailable: Boolean(latest.outputAvailable),
+          outputId: latest.outputId ?? null,
+        });
+      } catch (error) {
+        return mapError(error);
       }
-      return okStructured({
-        available: true,
-        taskId: latest.taskId,
-        iteration: latest.iteration,
-        tests: latest.tests,
-        exitStatus: latest.exitStatus,
-        timestamp: latest.timestamp,
-        outputAvailable: Boolean(latest.outputAvailable),
-        outputId: latest.outputId ?? null,
-      });
     }
   );
 
@@ -399,16 +433,21 @@ export function createMcpServer(ctx: McpContext): McpServer {
       description:
         `Recent Codex execution records for this workspace: task id, iteration, changed files, ` +
         `tests and exit status. Use it after Codex reports EXECUTED. ${UNTRUSTED_NOTE}`,
-      inputSchema: {
+      inputSchema: input({
         limit: z.number().int().min(1).max(50).default(5),
-      },
+      }),
       outputSchema: executionSummaryOutputSchema,
       annotations: { readOnlyHint: true },
     },
     async (args, extra) => {
       const denied = requireScope(extra.authInfo, "execution.read");
       if (denied) return denied;
-      return okStructured({ records: readExecutionRecords(workspace.id, args.limit) });
+      try {
+        const workspace = workspaceFor(args, extra);
+        return okStructured({ records: readExecutionRecords(workspace.id, args.limit) });
+      } catch (error) {
+        return mapError(error);
+      }
     }
   );
 
@@ -420,52 +459,56 @@ export function createMcpServer(ctx: McpContext): McpServer {
         `List or read command output that Codex chose to record after a test/build/lint/typecheck ` +
         `run. Call with action=list first, then action=read and an id. Restricted items have no ` +
         `body. This does not run commands. ${UNTRUSTED_NOTE}`,
-      inputSchema: {
+      inputSchema: input({
         action: z.enum(["list", "read"]).default("list"),
         id: z.number().int().positive().optional(),
         limit: z.number().int().min(1).max(50).default(20),
-      },
+      }),
       outputSchema: executionOutputOutputSchema,
       annotations: { readOnlyHint: true },
     },
     async (args, extra) => {
       const denied = requireScope(extra.authInfo, "execution.read");
       if (denied) return denied;
-      const action = args.action ?? "list";
-      if (action === "list") {
-        const items = listExecutionOutputs(workspace.id, args.limit).map((item) => ({
-          id: item.id,
-          command: item.command,
-          exitCode: item.exitCode,
-          timestamp: item.timestamp,
-          taskId: item.taskId ?? null,
-          iteration: item.iteration ?? null,
-          readable: item.allowed,
-          status: item.allowed ? "readable" : "restricted",
-          truncated: item.truncated,
-          sizeBytes: item.sizeBytes,
-        }));
-        return okStructured({ action: "list", items });
-      }
-      if (args.id === undefined) return fail("INVALID_ARGUMENTS", "read requires id");
-      const result = readExecutionOutput(workspace.id, args.id);
-      if (!result.ok) {
-        if (result.error === "OUTPUT_RESTRICTED") {
-          return fail("OUTPUT_RESTRICTED", "This output was not released for ChatGPT to read.");
+      try {
+        const workspace = workspaceFor(args, extra);
+        const action = args.action ?? "list";
+        if (action === "list") {
+          const items = listExecutionOutputs(workspace.id, args.limit).map((item) => ({
+            id: item.id,
+            command: item.command,
+            exitCode: item.exitCode,
+            timestamp: item.timestamp,
+            taskId: item.taskId ?? null,
+            iteration: item.iteration ?? null,
+            readable: item.allowed,
+            status: item.allowed ? "readable" : "restricted",
+            truncated: item.truncated,
+            sizeBytes: item.sizeBytes,
+          }));
+          return okStructured({ action: "list", items });
         }
-        return fail("NOT_FOUND", `No execution output with id ${args.id}.`);
+        if (args.id === undefined) return fail("INVALID_ARGUMENTS", "read requires id");
+        const result = readExecutionOutput(workspace.id, args.id);
+        if (!result.ok) {
+          if (result.error === "OUTPUT_RESTRICTED") {
+            return fail("OUTPUT_RESTRICTED", "This output was not released for ChatGPT to read.");
+          }
+          return fail("NOT_FOUND", `No execution output with id ${args.id}.`);
+        }
+        return okStructured({
+          action: "read",
+          id: result.meta.id,
+          command: result.meta.command,
+          exitCode: result.meta.exitCode,
+          timestamp: result.meta.timestamp,
+          truncated: result.meta.truncated,
+          text: result.text,
+        });
+      } catch (error) {
+        return mapError(error);
       }
-      return okStructured({
-        action: "read",
-        id: result.meta.id,
-        command: result.meta.command,
-        exitCode: result.meta.exitCode,
-        timestamp: result.meta.timestamp,
-        truncated: result.meta.truncated,
-        text: result.text,
-      });
     }
   );
 
-  return server;
 }

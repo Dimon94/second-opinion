@@ -8,11 +8,16 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { describe, expect, it } from "vitest";
 import { startBridge, type Bridge } from "../src/bridge/server.js";
 import { mcpUrlFromPublic } from "../src/config/endpoint.js";
-import { cleanup, isolateStateDir, makeGitRepo, makeTmpDir, write } from "./helpers.js";
+import { appendExecutionRecord } from "../src/execution/records.js";
+import { saveExecutionOutput } from "../src/execution/output.js";
+import { Workspace } from "../src/workspace/manager.js";
+import { cleanup, git, isolateStateDir, makeGitRepo, makeTmpDir, write } from "./helpers.js";
 
 const execFileAsync = promisify(execFile);
 
-function issueAccessToken(bridge: Bridge, scopes = ["workspace.read"]): string {
+const ALL_SCOPES = ["workspace.read", "workspace.search", "git.read", "execution.read"];
+
+function issueAccessToken(bridge: Bridge, scopes = ALL_SCOPES): string {
   const client = bridge.authStore.registerClient({
     clientName: "session-routing-test",
     redirectUris: ["https://chatgpt.com/oauth/callback"],
@@ -49,6 +54,12 @@ describe("session-routed MCP entry", () => {
     makeGitRepo(rootB);
     write(rootA, "identity.txt", "workspace A\n");
     write(rootB, "identity.txt", "workspace B\n");
+    write(rootA, ".c2cignore", "only-a.secret\n");
+    write(rootB, ".c2cignore", "only-b.secret\n");
+    write(rootA, "only-a.secret", "hidden-a\n");
+    write(rootB, "only-b.secret", "hidden-b\n");
+    write(rootA, "src/index.ts", "export const answer = 'only-a';\n");
+    write(rootB, "src/index.ts", "export const answer = 'only-b';\n");
     const bridge = await startBridge({
       workspaceRoot: rootA,
       port: 0,
@@ -68,6 +79,15 @@ describe("session-routed MCP entry", () => {
       });
 
     try {
+      const tools = (await client.listTools()).tools;
+      expect(tools.map((tool) => tool.name).sort()).toEqual([
+        "bind_workspace", "execution_output", "execution_summary", "git_diff", "git_status",
+        "list_directory", "read_file", "search_workspace", "test_status", "workspace_info",
+      ]);
+      for (const tool of tools.filter((candidate) => candidate.name !== "bind_workspace")) {
+        expect((tool.inputSchema as { properties?: Record<string, unknown> }).properties).toHaveProperty("binding_token");
+      }
+
       expect((await admin("/admin/bindings/bootstrap", { workspaceRoot: rootA, taskId: "task-a" }, false)).status).toBe(404);
       const mintedA = await admin("/admin/bindings/bootstrap", { workspaceRoot: rootA, taskId: "task-a" });
       expect(mintedA.status).toBe(200);
@@ -113,6 +133,19 @@ describe("session-routed MCP entry", () => {
       expect(JSON.stringify(insufficient)).toContain("INSUFFICIENT_SCOPE");
       await narrowClient.close();
 
+      const readOnlyToken = issueAccessToken(bridge, ["workspace.read"]);
+      const readOnlyClient = await sessionClient(bridge, readOnlyToken);
+      const readOnlyBootstrap = bridge.bindings.mint(rootA, "task-read-only");
+      const readOnlyBinding = data<{ binding_token: string }>(await call(
+        readOnlyClient, "session-read-only", "bind_workspace", { bootstrap_token: readOnlyBootstrap.bootstrapToken }
+      ));
+      const gitDenied = await call(readOnlyClient, "session-read-only", "git_status", {
+        binding_token: readOnlyBinding.binding_token,
+      });
+      expect(gitDenied.isError).toBe(true);
+      expect(JSON.stringify(gitDenied)).toContain("INSUFFICIENT_SCOPE");
+      await readOnlyClient.close();
+
       const cli = fileURLToPath(new URL("../src/cli/index.ts", import.meta.url));
       await expect(execFileAsync(process.execPath, [
         "--import", "tsx", cli, "binding", "bootstrap", "--json",
@@ -132,32 +165,68 @@ describe("session-routed MCP entry", () => {
       const boundB = data<{ binding_token: string }>(await call(client, "session-b", "bind_workspace", {
         bootstrap_token: bootstrapB.bootstrapToken,
       }));
-      const [infoAResult, fileAResult, infoBResult, fileBResult, repeatedAResult, repeatedBResult] = await Promise.all([
+      appendExecutionRecord(infoId(rootA), execution("task-a", "tests-a"));
+      appendExecutionRecord(infoId(rootB), execution("task-b", "tests-b"));
+      saveExecutionOutput(infoId(rootA), { command: "test-a", raw: "output-a", exitCode: 0 });
+      saveExecutionOutput(infoId(rootB), { command: "test-b", raw: "output-b", exitCode: 0 });
+
+      const [infoAResult, fileAResult, infoBResult, fileBResult, searchA, searchB] = await Promise.all([
         call(client, "session-a", "workspace_info", { binding_token: boundA.binding_token }),
         call(client, "session-a", "read_file", { binding_token: boundA.binding_token, path: "identity.txt" }),
         call(client, "session-b", "workspace_info", { binding_token: boundB.binding_token }),
         call(client, "session-b", "read_file", { binding_token: boundB.binding_token, path: "identity.txt" }),
-        call(client, "session-a", "read_file", { binding_token: boundA.binding_token, path: "identity.txt" }),
-        call(client, "session-b", "read_file", { binding_token: boundB.binding_token, path: "identity.txt" }),
+        call(client, "session-a", "search_workspace", { binding_token: boundA.binding_token, query: "only-a" }),
+        call(client, "session-b", "search_workspace", { binding_token: boundB.binding_token, query: "only-b" }),
       ]);
       const infoA = data<{ workspaceId: string }>(infoAResult);
       const infoB = data<{ workspaceId: string }>(infoBResult);
       expect(infoA.workspaceId).not.toBe(infoB.workspaceId);
-      expect([fileAResult, fileBResult, repeatedAResult, repeatedBResult].map((result) =>
+      expect([fileAResult, fileBResult].map((result) =>
         data<{ content: string }>(result).content
-      )).toEqual(["workspace A", "workspace B", "workspace A", "workspace B"]);
+      )).toEqual(["workspace A", "workspace B"]);
+      expect(data<{ matches: { text: string }[] }>(searchA).matches[0].text).toContain("only-a");
+      expect(data<{ matches: { text: string }[] }>(searchB).matches[0].text).toContain("only-b");
+
+      const bindings = [boundA, boundB];
+      const sessions = ["session-a", "session-b"];
+      const both = (name: string, args: Record<string, unknown> = {}) => Promise.all(bindings.map((bound, index) =>
+        call(client, sessions[index], name, { binding_token: bound.binding_token, ...args })
+      ));
+      const inFlight = both("read_file", { path: "identity.txt" });
+      const switched = await admin("/admin/workspace", { workspaceRoot: rootB });
+      expect(switched.status).toBe(200);
+      expect((await inFlight).map((result) => data<{ content: string }>(result).content)).toEqual([
+        "workspace A", "workspace B",
+      ]);
+      const listings = await both("list_directory", { path: "." });
+      const statuses = await both("git_status");
+      const diffs = await both("git_diff", { mode: "unstaged" });
+      const testStatuses = await both("test_status");
+      const summaries = await both("execution_summary");
+      const outputs = await both("execution_output", { action: "list" });
+      const sides = ["a", "b"];
+      for (let index = 0; index < sides.length; index++) {
+        expect(data<{ entries: { path: string }[] }>(listings[index]).entries.some((entry) => entry.path === "identity.txt")).toBe(true);
+        expect(data<{ unstaged: { path: string }[] }>(statuses[index]).unstaged).toContainEqual({ path: "src/index.ts", change: "M" });
+        expect(JSON.stringify(statuses[index])).not.toContain(`only-${sides[index]}.secret`);
+        expect(data<{ hidden: { changes: number } }>(statuses[index]).hidden.changes).toBeGreaterThan(0);
+        expect(data<{ diff: string }>(diffs[index]).diff).toContain(`only-${sides[index]}`);
+        expect(data<{ tests: string }>(testStatuses[index]).tests).toBe(`tests-${sides[index]}`);
+        expect(data<{ records: { taskId: string }[] }>(summaries[index]).records[0].taskId).toBe(`task-${sides[index]}`);
+        expect(data<{ items: { command: string }[] }>(outputs[index]).items[0].command).toBe(`test-${sides[index]}`);
+      }
 
       const outside = await call(client, "session-a", "read_file", {
         binding_token: boundA.binding_token, path: "../../etc/hosts",
       });
       expect(outside.isError).toBe(true);
       expect(JSON.stringify(outside)).toContain("PATH_OUTSIDE_WORKSPACE");
-
-      const unsupported = await call(client, "session-a", "git_status", {
-        binding_token: boundA.binding_token,
+      const sensitive = await call(client, "session-a", "read_file", {
+        binding_token: boundA.binding_token, path: "only-a.secret",
       });
-      expect(unsupported.isError).toBe(true);
-      expect(JSON.stringify(unsupported)).toContain("Tool git_status not found");
+      expect(sensitive.isError).toBe(true);
+      expect(JSON.stringify(sensitive)).toContain("ACCESS_DENIED_SENSITIVE_FILE");
+      expect(JSON.stringify(sensitive)).not.toContain("hidden-a");
 
       const persisted = fs.readFileSync(path.join(stateDir, "bindings", "store.json"), "utf8");
       expect(persisted).not.toContain(bootstrapA.bootstrapToken);
@@ -206,6 +275,48 @@ describe("session-routed MCP entry", () => {
     }
   });
 
+  it("keeps bindings isolated between worktrees of the same repository", async () => {
+    const stateDir = isolateStateDir();
+    const main = makeTmpDir("binding-worktree-main");
+    const container = makeTmpDir("binding-worktree-alt");
+    const alternate = path.join(container, "checkout");
+    makeGitRepo(main);
+    git(main, "worktree", "add", "-b", "alternate", alternate);
+    write(main, "identity.txt", "main checkout\n");
+    write(alternate, "identity.txt", "alternate checkout\n");
+    const bridge = await startBridge({
+      workspaceRoot: main, port: 0, persistRuntime: false,
+      authStoreFile: path.join(stateDir, "auth.json"),
+    });
+    const client = await sessionClient(bridge, issueAccessToken(bridge));
+    try {
+      const bind = async (root: string, task: string, sessionId: string) => {
+        const bootstrap = bridge.bindings.mint(root, task);
+        return data<{ binding_token: string }>(await call(client, sessionId, "bind_workspace", {
+          bootstrap_token: bootstrap.bootstrapToken,
+        }));
+      };
+      const [mainBinding, alternateBinding] = await Promise.all([
+        bind(main, "main-task", "main-session"),
+        bind(alternate, "alternate-task", "alternate-session"),
+      ]);
+      const [mainFile, alternateFile] = await Promise.all([
+        call(client, "main-session", "read_file", { binding_token: mainBinding.binding_token, path: "identity.txt" }),
+        call(client, "alternate-session", "read_file", { binding_token: alternateBinding.binding_token, path: "identity.txt" }),
+      ]);
+      expect(data<{ content: string }>(mainFile).content).toBe("main checkout");
+      expect(data<{ content: string }>(alternateFile).content).toBe("alternate checkout");
+    } finally {
+      await client.close();
+      await bridge.close();
+      git(main, "worktree", "remove", "--force", alternate);
+      cleanup(stateDir);
+      cleanup(container);
+      cleanup(main);
+      delete process.env.C2C_STATE_DIR;
+    }
+  });
+
   it("rejects an expired local bootstrap", async () => {
     const stateDir = isolateStateDir();
     const root = makeTmpDir("binding-expired");
@@ -231,3 +342,11 @@ describe("session-routed MCP entry", () => {
     }
   });
 });
+
+function infoId(root: string): string {
+  return new Workspace(root).id;
+}
+
+function execution(taskId: string, tests: string) {
+  return { taskId, iteration: 1, changedFiles: 1, tests, exitStatus: "ok", timestamp: new Date().toISOString() };
+}
