@@ -1,8 +1,8 @@
 import path from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import { isDeepStrictEqual } from "node:util";
-import { getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
+import { ensureDir, getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
 
 export type ConversationMode = "long-chat" | "project";
 
@@ -82,13 +82,49 @@ export interface ConversationView {
   reuseSavedChat: boolean;
 }
 
+interface LegacySessionClaim {
+  version: 1;
+  ownerKey: string;
+}
+
+function taskSessionKey(workspaceId: string, hostTaskId: string): string {
+  const owner = hostTaskId.trim();
+  if (!owner || owner.length > 200) throw new Error("A valid local host task id is required.");
+  return createHash("sha256").update(JSON.stringify([workspaceId, owner])).digest("hex");
+}
+
+function legacyClaimDir(workspaceId: string): string {
+  const workspaceKey = createHash("sha256").update(workspaceId).digest("hex");
+  return path.join(getStateDir(), "sessions", "legacy-claims", workspaceKey);
+}
+
+function readLegacyClaim(workspaceId: string): LegacySessionClaim | null {
+  const claim = readJsonIfExists<LegacySessionClaim>(path.join(legacyClaimDir(workspaceId), "claim.json"));
+  return claim?.version === 1 && /^[a-f0-9]{64}$/.test(claim.ownerKey) ? claim : null;
+}
+
+function acquireLegacyClaim(workspaceId: string, ownerKey: string): void {
+  const root = ensureDir(path.dirname(legacyClaimDir(workspaceId)));
+  const active = legacyClaimDir(workspaceId);
+  const candidate = path.join(root, `.claim-${process.pid}-${randomUUID()}`);
+  ensureDir(candidate);
+  writeSecureJson(path.join(candidate, "claim.json"), { version: 1, ownerKey } satisfies LegacySessionClaim);
+  try {
+    fs.renameSync(candidate, active);
+  } catch {
+    // Another process may have won the atomic directory rename.
+  } finally {
+    fs.rmSync(candidate, { recursive: true, force: true });
+  }
+  const claim = readLegacyClaim(workspaceId);
+  if (!claim) throw new Error("legacy session ownership cannot be verified");
+  if (claim.ownerKey !== ownerKey) throw new Error("legacy session already belongs to another host task");
+}
+
 /** hostTaskId comes from the local host, never the conversation's protocol taskId. */
 export function sessionFile(workspaceId: string, hostTaskId?: string): string {
   if (hostTaskId !== undefined) {
-    const owner = hostTaskId.trim();
-    if (!owner || owner.length > 200) throw new Error("A valid local host task id is required.");
-    const key = createHash("sha256").update(JSON.stringify([workspaceId, owner])).digest("hex");
-    return path.join(getStateDir(), "sessions", "tasks", `${key}.json`);
+    return path.join(getStateDir(), "sessions", "tasks", `${taskSessionKey(workspaceId, hostTaskId)}.json`);
   }
   return path.join(getStateDir(), "sessions", `${workspaceId}.json`);
 }
@@ -125,8 +161,14 @@ export function startNewTaskSession(workspaceId: string, hostTaskId: string): Sa
 }
 
 export function claimLegacySession(workspaceId: string, hostTaskId: string): SavedSession | null {
+  const ownerKey = taskSessionKey(workspaceId, hostTaskId);
   const current = readSession(workspaceId, hostTaskId);
   const legacy = readSession(workspaceId);
+  const existingClaim = readLegacyClaim(workspaceId);
+  if (existingClaim?.ownerKey !== undefined && existingClaim.ownerKey !== ownerKey) {
+    throw new Error("legacy session already belongs to another host task");
+  }
+  if (legacy) acquireLegacyClaim(workspaceId, ownerKey);
   if (current) {
     if (legacy && !isDeepStrictEqual(withoutUpdateTimes(current), withoutUpdateTimes(legacy))) {
       throw new Error("this host task already has a different session");
