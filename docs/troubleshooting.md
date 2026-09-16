@@ -82,6 +82,12 @@ CAPTCHA, Cloudflare authorization, Connector deletion/creation, OAuth consent,
 and administrator approval. The recovery workflow does not use OpenCLI, Secure
 MCP Tunnel, or an unsupported ChatGPT Connector CRUD API.
 
+Direct session routing is supported from Codex project tasks on macOS and
+Windows when the host supplies `CODEX_THREAD_ID` and the task cwd. A shell or
+host without that task identity cannot authorize a routed workspace: start the
+command from the intended Codex task. Never invent an id or fall back to the
+machine's last active workspace.
+
 ### "配对码无效/过期"
 Pairing codes are one-time and expire after ~5 minutes:
 
@@ -90,6 +96,12 @@ c2c pair
 ```
 
 generates a fresh one (older codes become invalid immediately).
+
+### Temporary address keeps dropping on a UDP-filtered network
+Leave `C2C_TUNNEL_PROTOCOL` unset to keep cloudflared's default. If the network
+repeatedly drops QUIC, set `C2C_TUNNEL_PROTOCOL=http2` before restarting the
+Bridge. Valid values are `auto`, `quic`, and `http2`; any other value fails
+before cloudflared starts.
 
 ### ChatGPT gets 401 on every tool call
 The access token expired and refresh failed (e.g. after `c2c unpair` or a

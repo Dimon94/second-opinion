@@ -130,6 +130,8 @@ describe("setup and run Skill doctor handoff", () => {
     expect(protocol).toMatch(/`TASK_ID` below correlates C2C\s+messages only/);
     expect(protocol).toContain("include it in every workspace_info and read_file call");
     expect(shared).toContain("legacy_session_ambiguous");
+    expect(shared).toContain("LOCAL_CODEX_TASK_REQUIRED");
+    expect(shared).toContain("global/last-active workspace");
     expect(shared).toContain("c2c session claim-legacy");
     expect(shared).toContain("c2c session start-new");
     expect(shared).toContain("Retry-only");

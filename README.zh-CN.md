@@ -110,7 +110,7 @@ Tunnel，因为固定域名在 Bridge 或 Tunnel 重启后仍然不变。Quick T
 - **控制面（Computer Use）**：Codex 与 ChatGPT 之间只交换极小的结构化 `[C2C]`
   状态消息——`INIT → PLAN → EXECUTED → REVIEW → DONE`。绝不粘贴 diff、日志
   或文件内容。
-- **数据面（MCP）**：ChatGPT 缺什么自己拉什么，共 9 个只读工具：
+- **数据面（MCP）**：生产连接使用 `/mcp/session`，同一任务绑定下提供 9 个只读工具：
   `workspace_info`、`list_directory`、`read_file`、`search_workspace`、
   `git_status`、`git_diff`、`test_status`、`execution_summary`、
   `execution_output`。
@@ -121,8 +121,9 @@ Tunnel，因为固定域名在 Bridge 或 Tunnel 重启后仍然不变。Quick T
 
 - **从构造上只读**：服务端根本不存在写文件/删除/Shell/提交类工具，任何提示
   注入都无法启用它们。
-- **当前工作区就是数据边界**：一份机器级授权跟随本机 Codex 当前选择的规范工作区；
-  远程 OAuth/MCP 请求不能切换工作区。路径校验仍会拦截 symlink、`../` 和绝对路径逃逸。
+- **本地任务绑定就是数据边界**：一份机器级授权可服务多个由本机 Codex 授权的工作区；
+  每次远程请求必须同时匹配 OAuth、任务会话和绑定令牌，不能选择或回退到其他工作区。
+  路径校验仍会拦截 symlink、`../` 和绝对路径逃逸。
 - **敏感文件永不外泄**：`.env*`、密钥、SSH、各类凭据默认拒绝
   （`.env.example` 放行）；`.c2cignore` 可追加自定义规则。
 - **知道 URL 不等于有权限**：公网 MCP 端点强制 OAuth 2.1（PKCE S256、动态
@@ -145,7 +146,9 @@ c2c status / doctor / pair / unpair / logs / stop
 ```
 
 环境要求：Node.js >= 20、git；公网连接需要 `cloudflared`
-（自动检测，Skill 会替你安装）。
+（自动检测，Skill 会替你安装）。直接任务路由支持 macOS 和 Windows 上能提供
+`CODEX_THREAD_ID` 与任务 cwd 的 Codex 项目任务；缺少本地任务上下文时会安全失败，
+不会复用其他任务或机器上最后活跃的工作区。
 
 文档：[架构](docs/architecture.md) · [协议](docs/protocol.md) ·
 [安全](docs/security.md) · [故障排查](docs/troubleshooting.md) ·

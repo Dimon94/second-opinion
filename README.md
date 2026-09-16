@@ -172,10 +172,9 @@ Credentials stay in the OS app state directory, not in the project.
 - **Control plane (Computer Use)**: Codex and ChatGPT exchange tiny structured
   `[C2C]` state messages — `INIT → PLAN → EXECUTED → REVIEW → DONE`. No diffs,
   no logs, no file bodies are ever pasted.
-- **Data plane (MCP)**: the production Connector uses `/mcp/session`. The first
-  routed slice exposes `workspace_info` and `read_file`; every request requires
-  OAuth plus the task/session `binding_token`. The remaining read-only tools
-  stay unavailable on this entry until #14.
+- **Data plane (MCP)**: the production Connector uses `/mcp/session`. All
+  read-only tools resolve the same immutable task binding; every request
+  requires OAuth plus the task/session `binding_token`.
 - **Independent review**: after Codex executes, ChatGPT inspects the actual
   git diff and test records through MCP — it never trusts "all tests passed"
   claims blindly.
@@ -213,7 +212,10 @@ c2c status / doctor / pair / unpair / logs / stop
 ```
 
 Requirements: Node.js >= 20, git. `cloudflared` for the public connection
-(auto-detected; the Skill installs it for you).
+(auto-detected; the Skill installs it for you). Direct task routing supports
+Codex project tasks on macOS and Windows when the host provides both
+`CODEX_THREAD_ID` and the task cwd. Without that local task context, routing
+fails closed; it does not reuse another task or the last active workspace.
 
 Docs: [architecture](docs/architecture.md) · [protocol](docs/protocol.md) ·
 [security](docs/security.md) · [troubleshooting](docs/troubleshooting.md) ·

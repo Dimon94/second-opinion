@@ -13,6 +13,10 @@ can remain before direct use, and browser compatibility can still require a
 conversation action. Conversely, exit status 2 is a planned HITL pause, not a
 failed recovery.
 
+If `CODEX_THREAD_ID` or the task cwd is unavailable, stop with
+`LOCAL_CODEX_TASK_REQUIRED`. Do not invent a task id, open browser compatibility,
+or fall back to a global/last-active workspace.
+
 The Connector endpoint returned by doctor is the session-routed `/mcp/session`
 entry. Before current-task `@Second Opinion` or a compatibility conversation
 calls it, the invoking Skill must mint a local bootstrap from the host
