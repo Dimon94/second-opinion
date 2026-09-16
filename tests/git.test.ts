@@ -58,16 +58,21 @@ describe("gitStatus", () => {
   });
 
   it("hides sensitive paths and counts hidden changes", () => {
-    write(repo, ".c2cignore", "private-notes/\n");
+    write(repo, ".c2cignore", "private-notes/\n私密 记录.txt\n");
     write(repo, ".env", "SECRET_KEY=hidden\n");
+    write(repo, "密钥 文件.key", "hidden key\n");
+    write(repo, "私密 记录.txt", "hidden custom rule\n");
     write(repo, "private-notes/secret.md", "hidden notes\n");
     write(repo, "visible.txt", "visible\n");
 
     const status = gitStatus(repo);
     expect(status.untracked).toContain("visible.txt");
     expect(status.untracked).not.toContain(".env");
+    expect(status.untracked).not.toContain("密钥 文件.key");
+    expect(status.untracked).not.toContain("私密 记录.txt");
     expect(status.untracked).not.toContain("private-notes/secret.md");
-    expect(status.hidden.changes).toBeGreaterThanOrEqual(2);
+    expect(status.untracked.every((filePath) => !filePath.includes("\\345"))).toBe(true);
+    expect(status.hidden.changes).toBeGreaterThanOrEqual(4);
     expect(status.hidden.conflicts).toBe(0);
   });
 
@@ -75,14 +80,15 @@ describe("gitStatus", () => {
     const renameRepo = makeTmpDir("git-status-rename");
     try {
       makeGitRepo(renameRepo);
-      write(renameRepo, ".npmrc", "//registry/:_authToken=hidden\n");
-      git(renameRepo, "add", "-f", ".npmrc");
+      write(renameRepo, "密钥 文件.key", "hidden\n");
+      git(renameRepo, "add", "-f", "密钥 文件.key");
       git(renameRepo, "commit", "-m", "secret baseline");
-      git(renameRepo, "mv", ".npmrc", "visible-name.txt");
+      git(renameRepo, "mv", "密钥 文件.key", "visible name.txt");
 
       const status = gitStatus(renameRepo);
-      expect(JSON.stringify(status)).not.toContain(".npmrc");
-      expect(JSON.stringify(status)).not.toContain("visible-name.txt");
+      expect(JSON.stringify(status)).not.toContain("密钥 文件.key");
+      expect(JSON.stringify(status)).not.toContain("visible name.txt");
+      expect(JSON.stringify(status)).not.toContain("\\345");
       expect(status.hidden.changes).toBe(1);
     } finally {
       cleanup(renameRepo);
@@ -93,21 +99,22 @@ describe("gitStatus", () => {
     const conflictRepo = makeTmpDir("git-status-conflict");
     try {
       makeGitRepo(conflictRepo);
-      write(conflictRepo, ".env.local", "VALUE=base\n");
-      git(conflictRepo, "add", "-f", ".env.local");
+      write(conflictRepo, "密钥 冲突.key", "VALUE=base\n");
+      git(conflictRepo, "add", "-f", "密钥 冲突.key");
       git(conflictRepo, "commit", "-m", "secret baseline");
       git(conflictRepo, "switch", "-c", "other");
-      write(conflictRepo, ".env.local", "VALUE=other\n");
-      git(conflictRepo, "add", "-f", ".env.local");
+      write(conflictRepo, "密钥 冲突.key", "VALUE=other\n");
+      git(conflictRepo, "add", "-f", "密钥 冲突.key");
       git(conflictRepo, "commit", "-m", "other secret");
       git(conflictRepo, "switch", "main");
-      write(conflictRepo, ".env.local", "VALUE=main\n");
-      git(conflictRepo, "add", "-f", ".env.local");
+      write(conflictRepo, "密钥 冲突.key", "VALUE=main\n");
+      git(conflictRepo, "add", "-f", "密钥 冲突.key");
       git(conflictRepo, "commit", "-m", "main secret");
       expect(() => git(conflictRepo, "merge", "other")).toThrow();
 
       const status = gitStatus(conflictRepo);
-      expect(JSON.stringify(status)).not.toContain(".env.local");
+      expect(JSON.stringify(status)).not.toContain("密钥 冲突.key");
+      expect(JSON.stringify(status)).not.toContain("\\345");
       expect(status.conflicted).toEqual([]);
       expect(status.hidden.conflicts).toBe(1);
     } finally {

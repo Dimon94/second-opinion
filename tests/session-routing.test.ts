@@ -284,6 +284,16 @@ describe("session-routed MCP entry", () => {
     git(main, "worktree", "add", "-b", "alternate", alternate);
     write(main, "identity.txt", "main checkout\n");
     write(alternate, "identity.txt", "alternate checkout\n");
+    write(main, "src/index.ts", "export const checkout = 'main-only';\n");
+    write(alternate, "src/index.ts", "export const checkout = 'alternate-only';\n");
+    appendExecutionRecord(infoId(main), execution("main-task", "main-tests"));
+    appendExecutionRecord(infoId(alternate), execution("alternate-task", "alternate-tests"));
+    const mainOutput = saveExecutionOutput(infoId(main), {
+      command: "main-command", raw: "main-output", exitCode: 0,
+    });
+    const alternateOutput = saveExecutionOutput(infoId(alternate), {
+      command: "alternate-command", raw: "alternate-output", exitCode: 0,
+    });
     const bridge = await startBridge({
       workspaceRoot: main, port: 0, persistRuntime: false,
       authStoreFile: path.join(stateDir, "auth.json"),
@@ -300,12 +310,50 @@ describe("session-routed MCP entry", () => {
         bind(main, "main-task", "main-session"),
         bind(alternate, "alternate-task", "alternate-session"),
       ]);
-      const [mainFile, alternateFile] = await Promise.all([
-        call(client, "main-session", "read_file", { binding_token: mainBinding.binding_token, path: "identity.txt" }),
-        call(client, "alternate-session", "read_file", { binding_token: alternateBinding.binding_token, path: "identity.txt" }),
+      const invoke = (session: string, token: string, name: string, args: Record<string, unknown> = {}) =>
+        call(client, session, name, { binding_token: token, ...args });
+      const each = (name: string, args: Record<string, unknown> = {}) => Promise.all([
+        invoke("main-session", mainBinding.binding_token, name, args),
+        invoke("alternate-session", alternateBinding.binding_token, name, args),
       ]);
+      const [mainFile, alternateFile] = await each("read_file", { path: "identity.txt" });
       expect(data<{ content: string }>(mainFile).content).toBe("main checkout");
       expect(data<{ content: string }>(alternateFile).content).toBe("alternate checkout");
+
+      const infos = await each("workspace_info");
+      expect(data<{ workspaceId: string }>(infos[0]).workspaceId)
+        .not.toBe(data<{ workspaceId: string }>(infos[1]).workspaceId);
+      const searches = await Promise.all([
+        invoke("main-session", mainBinding.binding_token, "search_workspace", { query: "main-only" }),
+        invoke("alternate-session", alternateBinding.binding_token, "search_workspace", { query: "alternate-only" }),
+      ]);
+      expect(data<{ matches: { text: string }[] }>(searches[0]).matches[0].text).toContain("main-only");
+      expect(data<{ matches: { text: string }[] }>(searches[1]).matches[0].text).toContain("alternate-only");
+
+      const statuses = await each("git_status");
+      const diffs = await each("git_diff", { mode: "unstaged" });
+      const testStatuses = await each("test_status");
+      const summaries = await each("execution_summary");
+      const outputs = await each("execution_output", { action: "list" });
+      for (const index of [0, 1]) {
+        const own = index === 0 ? "main" : "alternate";
+        const sibling = index === 0 ? "alternate" : "main";
+        expect(data<{ unstaged: { path: string }[] }>(statuses[index]).unstaged)
+          .toContainEqual({ path: "src/index.ts", change: "M" });
+        expect(data<{ diff: string }>(diffs[index]).diff).toContain(`${own}-only`);
+        expect(data<{ diff: string }>(diffs[index]).diff).not.toContain(`${sibling}-only`);
+        expect(data<{ tests: string }>(testStatuses[index]).tests).toBe(`${own}-tests`);
+        expect(data<{ records: { taskId: string }[] }>(summaries[index]).records[0].taskId)
+          .toBe(`${own}-task`);
+        expect(data<{ items: { command: string }[] }>(outputs[index]).items[0].command)
+          .toBe(`${own}-command`);
+      }
+      const outputBodies = await Promise.all([
+        invoke("main-session", mainBinding.binding_token, "execution_output", { action: "read", id: mainOutput.id }),
+        invoke("alternate-session", alternateBinding.binding_token, "execution_output", { action: "read", id: alternateOutput.id }),
+      ]);
+      expect(data<{ text: string }>(outputBodies[0]).text).toBe("main-output");
+      expect(data<{ text: string }>(outputBodies[1]).text).toBe("alternate-output");
     } finally {
       await client.close();
       await bridge.close();

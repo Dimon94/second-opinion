@@ -84,11 +84,13 @@ export function gitStatus(target: GitTarget): GitStatusResult {
     conflicted: [],
     hidden: { changes: 0, conflicts: 0 },
   };
-  const result = runGit(root, ["status", "--porcelain=v2", "--branch", "--", "."]);
+  const result = runGit(root, ["status", "--porcelain=v2", "--branch", "-z", "--", "."]);
   if (!result.ok) return empty;
   const out: GitStatusResult = { ...empty, hidden: { ...empty.hidden }, isRepo: true };
   const withheld = (paths: string[]) => paths.some((filePath) => ignoreRules.isSensitive(filePath));
-  for (const line of result.stdout.split("\n")) {
+  const records = result.stdout.split("\0");
+  for (let index = 0; index < records.length; index += 1) {
+    const line = records[index];
     if (line.startsWith("# branch.head ")) {
       out.branch = line.slice("# branch.head ".length).trim();
     } else if (line.startsWith("# branch.upstream ")) {
@@ -103,10 +105,8 @@ export function gitStatus(target: GitTarget): GitStatusResult {
       const parts = line.split(" ");
       const xy = parts[1] ?? "";
       const isRename = line.startsWith("2 ");
-      const destination = isRename
-        ? (line.split("\t")[0]?.split(" ").slice(9).join(" ") ?? "")
-        : parts.slice(8).join(" ");
-      const origin = isRename ? (line.split("\t")[1] ?? "") : null;
+      const destination = parts.slice(isRename ? 9 : 8).join(" ");
+      const origin = isRename ? (records[++index] ?? "") : null;
       if (withheld(origin === null ? [destination] : [destination, origin])) {
         out.hidden.changes += (xy[0] !== "." ? 1 : 0) + (xy[1] !== "." ? 1 : 0);
         continue;
