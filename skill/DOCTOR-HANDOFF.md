@@ -50,7 +50,9 @@ The table is normative. There is one `nextAction` per doctor result.
   Connector is absent, continue to `nextAction.createPage`. If replacement is
   required, stop before deleting the named Connector, then continue to
   `nextAction.createPage` and recreate that same name with `nextAction.endpoint`.
-  Never use Reconnect or click an old endpoint.
+  Never use Reconnect or click an old endpoint. After the named Connector with
+  that endpoint is visibly present, rerun Doctor with
+  `--browser-gate connector_replaced --browser-page <current-url>`.
 - `authorize_oauth`: run `c2c pair -w <same-workspace> --json` only in this branch.
   The CLI retains the one-time, short-TTL, attempt-limited, memory-only session.
   Open `nextAction.page`, then pause at OAuth consent. The pairing code is the

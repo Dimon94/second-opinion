@@ -13,7 +13,7 @@ import {
   type RuntimeState,
 } from "../src/bridge/runtime.js";
 import { getDefaultStateDir, writeSecureJson } from "../src/config/paths.js";
-import { mcpUrlFromPublic, writeLastEndpoint } from "../src/config/endpoint.js";
+import { mcpUrlFromPublic, readLastEndpoint, writeLastEndpoint } from "../src/config/endpoint.js";
 import { adminFetch, ensureBridge, stopBridge } from "../src/process/daemon.js";
 import { sessionFile, writeSession } from "../src/session/state.js";
 import type { TunnelDoctorReport, TunnelProvider, TunnelStatus } from "../src/tunnel/provider.js";
@@ -506,7 +506,11 @@ describe("c2c doctor contract", () => {
       fixture.workspace,
       fixture.stateDir,
       fixture.codexHome,
-      "--json"
+      "--json",
+      "--browser-gate",
+      "connector_replaced",
+      "--browser-page",
+      "https://chatgpt.com/plugins"
     );
     expect(authorize.status).toBe(2);
     expect(parseResult(authorize.stdout)).toMatchObject({
@@ -1492,7 +1496,7 @@ describe("c2c doctor contract", () => {
     expect(bridge.pairing.hasActiveSession()).toBe(false);
   });
 
-  it("starts Quick Tunnel without Cloudflare login and reports endpoint replacement fingerprints", async () => {
+  it("keeps Quick Tunnel replacement resumable until visible completion", async () => {
     const fixture = isolatedWorkspace("doctor-quick-rotation");
     dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
     process.env.C2C_STATE_DIR = fixture.stateDir;
@@ -1541,6 +1545,59 @@ describe("c2c doctor contract", () => {
     });
     expect(tunnel.startCalls).toBe(1);
     expect(bridge.pairing.hasActiveSession()).toBe(false);
+
+    expect(readLastEndpoint(workspace.id)).toMatchObject({
+      mcpUrl: "https://old.trycloudflare.com/mcp",
+    });
+
+    const unverified = await runDoctor(
+      fixture.workspace,
+      fixture.stateDir,
+      fixture.codexHome,
+      "--json",
+      "--browser-gate",
+      "connector_replaced",
+      "--browser-page",
+      "https://chatgpt.com/"
+    );
+    expect(parseResult(unverified.stdout)).toMatchObject({
+      outcome: "blocked",
+      reason: "checks_failed",
+      nextAction: { type: "manual_recovery", reason: "checks_failed" },
+    });
+    expect(readLastEndpoint(workspace.id)).toMatchObject({
+      mcpUrl: "https://old.trycloudflare.com/mcp",
+    });
+
+    const retry = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
+    expect(parseResult(retry.stdout)).toMatchObject({
+      outcome: "user_action_required",
+      reason: "endpoint_changed",
+      nextAction: { type: "replace_connector", endpoint: `${bridge.localBaseUrl()}/mcp/session` },
+    });
+    expect(readLastEndpoint(workspace.id)).toMatchObject({
+      mcpUrl: "https://old.trycloudflare.com/mcp",
+    });
+
+    const completed = await runDoctor(
+      fixture.workspace,
+      fixture.stateDir,
+      fixture.codexHome,
+      "--json",
+      "--browser-gate",
+      "connector_replaced",
+      "--browser-page",
+      "https://chatgpt.com/plugins"
+    );
+    expect(parseResult(completed.stdout)).toMatchObject({
+      outcome: "user_action_required",
+      reason: "auth_required",
+      nextAction: { type: "authorize_oauth" },
+      chatgptRepair: { needed: false, connectorAction: "none" },
+    });
+    expect(readLastEndpoint(workspace.id)).toMatchObject({
+      mcpUrl: `${bridge.localBaseUrl()}/mcp/session`,
+    });
   });
 
   it.each([

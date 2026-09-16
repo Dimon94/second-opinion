@@ -27,8 +27,7 @@ Dispatch only its `nextAction`; do not infer recovery state from other fields.
 
 1. Confirm this is a Codex project task and `CODEX_THREAD_ID` exists. The CLI
    rejects a missing host identity; never substitute a generated or user-supplied id.
-2. Run `c2c sandbox-allow --json`, then
-   `c2c doctor -w <current-project-root> --direct --json`. Follow its one action
+2. Run `c2c doctor -w <current-project-root> --direct --json`. Follow its one action
    through `skill/DOCTOR-HANDOFF.md` until `nextAction.type` is `none`.
 3. Inspect the current task's `@Second Opinion` tool schemas. They must expose:
    - `bind_workspace` with `bootstrap_token`;

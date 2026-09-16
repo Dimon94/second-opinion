@@ -68,12 +68,17 @@ describe("setup and run Skill doctor handoff", () => {
     expect(shared).toContain("c2c doctor -w <same-workspace> --json");
     expect(shared).toContain("c2c tunnel login --force --json");
     expect(shared).toContain("--browser-gate chatgpt_login");
+    expect(shared).toContain("--browser-gate connector_replaced");
     expect(shared).toContain("built-in browser only");
     expect(shared).toContain("MFA, CAPTCHA");
     expect(shared).toContain("Never use Reconnect");
     expect(shared).toMatch(/no\s+supported Connector CRUD API/);
     expect(setup).not.toMatch(/chatgptRepair|namedRepair|report\.bridge|c2c pair/);
     expect(run).not.toMatch(/chatgptRepair|namedRepair|report\.bridge|c2c pair/);
+    expect(run.indexOf("c2c doctor -w <current-project-root> --direct --json")).toBeLessThan(
+      run.indexOf("c2c workspace --json")
+    );
+    expect(run).not.toContain("c2c sandbox-allow");
   });
 
   it("does not treat a green local outcome as completion while a remote action remains", () => {

@@ -73,6 +73,7 @@ import {
   createDoctorResult,
   createRecoveryLeaseDoctorResult,
   applyDoctorBrowserGate,
+  observedConnectorReplacement,
   authorizationDisposition,
   DOCTOR_EXIT_STATUS,
   renderDoctorResult,
@@ -506,7 +507,10 @@ program
   .option("--diagnose-only", "diagnose only, do not repair", false)
   .option("--no-tunnel", "do not start or recover a public connection")
   .option("--direct", "prepare the current Codex task without a ChatGPT Web conversation", false)
-  .option("--browser-gate <gate>", "observed ChatGPT gate: chatgpt_login or administrator_approval")
+  .option(
+    "--browser-gate <gate>",
+    "observed ChatGPT gate: connector_replaced, chatgpt_login, or administrator_approval"
+  )
   .option("--browser-page <url>", "current ChatGPT page for an observed browser gate")
   .option("--json", "machine-readable output", false)
   .action(async (opts: {
@@ -528,8 +532,16 @@ program
     }
     const root = resolveWorkspace(opts.workspace);
     const browserGate = opts.browserGate as DoctorBrowserGate | undefined;
-    if (browserGate && browserGate !== "chatgpt_login" && browserGate !== "administrator_approval") {
-      handleCliError(new Error("browser-gate must be chatgpt_login or administrator_approval"), opts.json);
+    if (
+      browserGate &&
+      browserGate !== "connector_replaced" &&
+      browserGate !== "chatgpt_login" &&
+      browserGate !== "administrator_approval"
+    ) {
+      handleCliError(
+        new Error("browser-gate must be connector_replaced, chatgpt_login, or administrator_approval"),
+        opts.json
+      );
       return;
     }
     const shouldFix = opts.fix && !opts.diagnoseOnly;
@@ -744,6 +756,7 @@ program
         createConnector: CHATGPT_CREATE_CONNECTOR_URL,
       },
     };
+    let connectorReplacementCompleted = false;
 
     if (runtime) {
       let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
@@ -817,7 +830,13 @@ program
         const nextMcp = mcpUrlFromPublic(currentUrl);
         currentIdentityMcp = nextMcp;
         const action = connectorAction(lastEndpoint?.mcpUrl, nextMcp);
-        const boundName = nextMcp && shouldFix && recoveryLease
+        connectorReplacementCompleted =
+          action !== "none" &&
+          shouldFix &&
+          Boolean(recoveryLease) &&
+          observedConnectorReplacement(browserGate, opts.browserPage);
+        const boundName = nextMcp && shouldFix && recoveryLease &&
+          (action === "none" || connectorReplacementCompleted)
           ? persistWorkspaceEndpoint({
               workspaceId: info.workspaceId,
               workspaceName: info.workspaceName,
@@ -826,14 +845,28 @@ program
               mcpUrl: nextMcp,
               previous: lastEndpoint,
             })
-          : connectorName;
+          : connectorNameFor({
+              workspaceName: info.workspaceName,
+              workspaceId: info.workspaceId,
+              previousName: lastEndpoint?.connectorName,
+              hadEndpointBefore: Boolean(lastEndpoint),
+              replacingEndpoint: action === "update",
+            });
         chatgptRepair = {
           ...chatgptRepair,
-          needed: action !== "none",
-          reason: action === "update" ? "address_reclaimed" : action === "create" ? "connector_missing" : undefined,
-          connectorAction: action,
+          needed: action !== "none" && !connectorReplacementCompleted,
+          reason: connectorReplacementCompleted
+            ? undefined
+            : action === "update"
+              ? "address_reclaimed"
+              : action === "create"
+                ? "connector_missing"
+                : undefined,
+          connectorAction: connectorReplacementCompleted ? "none" : action,
           connectorName: boundName,
-          userMessage: action === "update" ? reclaimUserMessage(boundName) : undefined,
+          userMessage: action === "update" && !connectorReplacementCompleted
+            ? reclaimUserMessage(boundName)
+            : undefined,
           mcpUrl: nextMcp,
           previousMcpUrl: lastEndpoint?.mcpUrl ?? null,
         };
@@ -873,7 +906,11 @@ program
       currentFingerprint,
     };
 
-    if (lastEndpoint?.mcpUrl && !chatgptRepair.needed && !namedRepair.needed) {
+    if (
+      (lastEndpoint?.mcpUrl || connectorReplacementCompleted) &&
+      !chatgptRepair.needed &&
+      !namedRepair.needed
+    ) {
       if (tunnelResult.publicHealth !== "passed") {
         authorization = {
           state: "unreachable",

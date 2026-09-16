@@ -398,7 +398,10 @@ export function createDoctorResult(input: {
   };
 }
 
-export type DoctorBrowserGate = "chatgpt_login" | "administrator_approval";
+export type DoctorBrowserGate =
+  | "chatgpt_login"
+  | "administrator_approval"
+  | "connector_replaced";
 
 function safeChatgptPage(page?: string): string | undefined {
   if (!page) return undefined;
@@ -410,6 +413,14 @@ function safeChatgptPage(page?: string): string | undefined {
   } catch {
     return undefined;
   }
+}
+
+export function observedConnectorReplacement(
+  gate?: DoctorBrowserGate,
+  page?: string
+): boolean {
+  const safePage = safeChatgptPage(page);
+  return gate === "connector_replaced" && Boolean(safePage && new URL(safePage).pathname === "/plugins");
 }
 
 /** Convert an observed ChatGPT browser interruption into the same one-action doctor contract. */
@@ -427,7 +438,7 @@ export function applyDoctorBrowserGate(
     return result;
   }
   const safePage = safeChatgptPage(page);
-  if (!safePage) {
+  if (!safePage || (gate === "connector_replaced" && !observedConnectorReplacement(gate, page))) {
     return {
       ...result,
       outcome: "blocked",
@@ -436,6 +447,7 @@ export function applyDoctorBrowserGate(
       nextAction: { type: "manual_recovery", reason: "checks_failed" },
     };
   }
+  if (gate === "connector_replaced") return result;
   if (gate === "chatgpt_login") {
     const reason = "chatgpt_login_required";
     return {
