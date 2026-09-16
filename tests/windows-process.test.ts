@@ -5,6 +5,7 @@ import { cleanup, makeGitRepo, makeTmpDir, write } from "./helpers.js";
 
 const spawnSyncCalls: { file: string; args: unknown[]; options: Record<string, unknown> }[] = [];
 const spawnCalls: { file: string; args: unknown[]; options: Record<string, unknown> }[] = [];
+const previousCloudflaredPath = process.env.C2C_CLOUDFLARED_PATH;
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
@@ -33,11 +34,15 @@ describe("Windows background subprocesses", () => {
   beforeEach(() => {
     spawnSyncCalls.length = 0;
     spawnCalls.length = 0;
+    delete process.env.C2C_CLOUDFLARED_PATH;
     tmpDir = makeTmpDir("windows-process");
   });
 
   afterEach(() => {
     delete process.env.C2C_RG_PATH;
+    if (previousCloudflaredPath === undefined) delete process.env.C2C_CLOUDFLARED_PATH;
+    else process.env.C2C_CLOUDFLARED_PATH = previousCloudflaredPath;
+    vi.restoreAllMocks();
     resetRipgrepCache();
     cleanup(tmpDir);
   });
@@ -46,7 +51,6 @@ describe("Windows background subprocesses", () => {
     makeGitRepo(tmpDir);
     spawnSyncCalls.length = 0;
     runGit(tmpDir, ["status", "--porcelain"]);
-    findBinary("cloudflared");
     process.env.C2C_RG_PATH = "fake-rg";
     resetRipgrepCache();
     findRipgrep();
@@ -55,13 +59,23 @@ describe("Windows background subprocesses", () => {
     await expect(new ProcessCloudflaredAccount("fake-cloudflared").listTunnels()).rejects.toThrow();
 
     expect(spawnSyncCalls.find((call) => call.file === "git")?.options.windowsHide).toBe(true);
-    expect(
-      spawnSyncCalls.find((call) => call.file === "cloudflared" && call.args[0] === "--version")
-        ?.options.windowsHide
-    ).toBe(true);
     expect(spawnCalls.find((call) => call.file === "fake-rg")?.options.windowsHide).toBe(true);
     expect(
       spawnSyncCalls.find((call) => call.file === "fake-cloudflared")?.options.windowsHide
+    ).toBe(true);
+  });
+
+  it.each([
+    ["darwin", "cloudflared"],
+    ["win32", "cloudflared.exe"],
+  ] as const)("hides the %s cloudflared probe", (platform, executable) => {
+    vi.spyOn(process, "platform", "get").mockReturnValue(platform);
+
+    findBinary("cloudflared");
+
+    expect(
+      spawnSyncCalls.find((call) => call.file === executable && call.args[0] === "--version")
+        ?.options.windowsHide
     ).toBe(true);
   });
 
