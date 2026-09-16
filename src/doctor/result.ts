@@ -91,6 +91,16 @@ export interface DoctorTunnelResult {
   publicHealth: "passed" | "failed" | "unknown" | "not_checked";
 }
 
+export interface DoctorWorkspaceIdentity {
+  id: string | null;
+  name: string | null;
+}
+
+export interface DoctorBridgeObservation {
+  state: "healthy" | "stopped" | "unknown" | "not_checked";
+  reason: "runtime_missing" | "pid_missing" | "probe_failed" | "pid_unknown" | "workspace_mismatch" | null;
+}
+
 export type DoctorAuthorizationResult =
   | AuthorizationStatus
   | {
@@ -123,6 +133,9 @@ export interface DoctorResult {
   repairs: string[];
   safeRetry: boolean;
   nextAction: DoctorNextAction;
+  requestedWorkspace: DoctorWorkspaceIdentity;
+  activeWorkspace: DoctorWorkspaceIdentity | null;
+  bridgeObservation: DoctorBridgeObservation;
   conversation: DoctorConversationDisposition | null;
   endpointIdentity: DoctorEndpointIdentity;
   tunnel: DoctorTunnelResult;
@@ -150,7 +163,8 @@ export const DOCTOR_EXIT_STATUS: Readonly<Record<DoctorOutcome, 0 | 1 | 2>> = {
 export function createRecoveryLeaseDoctorResult(
   status: "busy" | "unknown",
   detail: string,
-  pages: DoctorChatgptRepair["pages"]
+  pages: DoctorChatgptRepair["pages"],
+  requestedWorkspace: DoctorWorkspaceIdentity
 ): DoctorResult {
   const reason: DoctorReason = status === "busy" ? "recovery_in_progress" : "probe_inconclusive";
   return {
@@ -160,6 +174,9 @@ export function createRecoveryLeaseDoctorResult(
     repairs: [],
     safeRetry: true,
     nextAction: { type: "retry_wait", reason },
+    requestedWorkspace,
+    activeWorkspace: null,
+    bridgeObservation: { state: "not_checked", reason: null },
     conversation: null,
     endpointIdentity: {
       changed: false,
@@ -208,6 +225,9 @@ export function createDoctorResult(input: {
   tunnelFailure?: "cloudflared_missing" | "transport_down" | "probe_inconclusive";
   bridgeStopped: boolean;
   bridgeUnknown: boolean;
+  requestedWorkspace: DoctorWorkspaceIdentity;
+  activeWorkspace: DoctorWorkspaceIdentity | null;
+  bridgeObservation: DoctorBridgeObservation;
 }): DoctorResult {
   const base = {
     version: DOCTOR_CONTRACT_VERSION,
@@ -215,6 +235,9 @@ export function createDoctorResult(input: {
     report: input.report,
     chatgptRepair: input.chatgptRepair,
     namedRepair: input.namedRepair,
+    requestedWorkspace: input.requestedWorkspace,
+    activeWorkspace: input.activeWorkspace,
+    bridgeObservation: input.bridgeObservation,
     conversation: null,
     endpointIdentity: input.endpointIdentity,
     tunnel: input.tunnel,

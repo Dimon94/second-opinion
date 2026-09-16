@@ -16,7 +16,9 @@ c2c doctor -w /path/to/workspace --diagnose-only --json
 `--diagnose-only` (and its existing alias, `--no-fix`) never changes Bridge,
 Tunnel, OAuth, session, lease, or endpoint state. JSON always contains
 `version`, `outcome`, stable `reason`, `repairs`, `safeRetry`, and exactly one
-structured `nextAction`. The legacy `report`, `chatgptRepair`, and
+structured `nextAction`, plus `requestedWorkspace`, `activeWorkspace` when
+known, and `bridgeObservation`. Workspace identities contain only `id` and
+`name`, never filesystem roots. The legacy `report`, `chatgptRepair`, and
 `namedRepair` fields remain available for existing callers.
 
 | Outcome | Exit status | Meaning |

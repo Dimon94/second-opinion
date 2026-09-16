@@ -82,6 +82,8 @@ import {
   type DoctorNamedRepair,
   type DoctorTunnelResult,
   type DoctorBrowserGate,
+  type DoctorBridgeObservation,
+  type DoctorWorkspaceIdentity,
 } from "../doctor/result.js";
 import { acquireRecoveryLease, type RecoveryLeaseHandle } from "../doctor/lease.js";
 
@@ -95,6 +97,18 @@ const cross = (msg: string): void => say(`✗ ${msg}`);
 
 function resolveWorkspace(option?: string): string {
   return path.resolve(option ?? process.cwd());
+}
+
+function doctorWorkspaceIdentity(workspace: Workspace): DoctorWorkspaceIdentity {
+  return { id: workspace.id, name: workspace.name };
+}
+
+function doctorRuntimeWorkspaceIdentity(runtime: RuntimeState): DoctorWorkspaceIdentity {
+  try {
+    return doctorWorkspaceIdentity(new Workspace(runtime.workspaceRoot));
+  } catch {
+    return { id: runtime.workspaceId, name: null };
+  }
 }
 
 function parseInteger(value: string): number {
@@ -536,7 +550,8 @@ program
               developerMode: CHATGPT_DEVELOPER_MODE_URL,
               plugins: CHATGPT_PLUGINS_URL,
               createConnector: CHATGPT_CREATE_CONNECTOR_URL,
-            }
+            },
+            doctorWorkspaceIdentity(requested)
           );
           process.exitCode = DOCTOR_EXIT_STATUS[result.outcome];
           say(
@@ -610,13 +625,26 @@ program
       report.workspace = { ok: false, detail: (error as Error).message };
     }
 
+    const requestedWorkspace = workspace
+      ? doctorWorkspaceIdentity(workspace)
+      : { id: null, name: null };
+
     // Bridge
     recoveryLease?.updatePhase("bridge");
     let runtime: RuntimeState | null = null;
     let bridgeUnknown = false;
     let bridgeStopped = false;
+    let activeWorkspace: DoctorWorkspaceIdentity | null = null;
+    let bridgeObservation: DoctorBridgeObservation = { state: "not_checked", reason: null };
     if (workspace) {
       const observation = await findBridgeObservation(workspace.id);
+      bridgeObservation = {
+        state: observation.state,
+        reason: observation.state === "healthy" ? null : observation.reason,
+      };
+      if (observation.state === "healthy") {
+        activeWorkspace = doctorRuntimeWorkspaceIdentity(observation.runtime);
+      }
       if (observation.state === "unknown") {
         bridgeUnknown = true;
         report.bridge = { ok: false, detail: `状态无法确认（${observation.reason}），未自动修复` };
@@ -626,6 +654,7 @@ program
           runtime = ensured.runtime;
           if (ensured.spawned) results.push("已自动启动 Bridge");
           else if (ensured.activated) results.push("已激活目标 Workspace");
+          bridgeObservation = { state: "healthy", reason: null };
         } catch (error) {
           report.bridge = { ok: false, detail: (error as Error).message };
         }
@@ -641,7 +670,10 @@ program
       } else {
         bridgeStopped = true;
       }
-      if (runtime) report.bridge = { ok: true, detail: `端口 ${runtime.port}` };
+      if (runtime) {
+        activeWorkspace = doctorRuntimeWorkspaceIdentity(runtime);
+        report.bridge = { ok: true, detail: `端口 ${runtime.port}` };
+      }
       else report.bridge = report.bridge ?? { ok: false, detail: "未运行" };
     }
 
@@ -896,6 +928,9 @@ program
       tunnelFailure,
       bridgeStopped,
       bridgeUnknown,
+      requestedWorkspace,
+      activeWorkspace,
+      bridgeObservation,
       conversation: workspace
         ? {
             workspaceId: workspace.id,

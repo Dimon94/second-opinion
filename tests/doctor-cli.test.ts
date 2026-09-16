@@ -302,6 +302,9 @@ describe("c2c doctor contract", () => {
       outcome: "repaired",
       reason: "local_repairs_completed",
       safeRetry: true,
+      requestedWorkspace: { id: bridge.workspace.id, name: bridge.workspace.name },
+      activeWorkspace: { id: bridge.workspace.id, name: bridge.workspace.name },
+      bridgeObservation: { state: "healthy", reason: null },
       nextAction: { type: "create_conversation", reason: "conversation_missing" },
       conversation: { mode: "project", workspaceId: expect.any(String) },
     });
@@ -320,6 +323,9 @@ describe("c2c doctor contract", () => {
       reason: "all_checks_passed",
       repairs: [],
       safeRetry: true,
+      requestedWorkspace: { id: bridge.workspace.id, name: bridge.workspace.name },
+      activeWorkspace: { id: bridge.workspace.id, name: bridge.workspace.name },
+      bridgeObservation: { state: "healthy", reason: null },
       nextAction: { type: "create_conversation", reason: "conversation_missing" },
       conversation: { mode: "project", workspaceId: expect.any(String) },
     });
@@ -337,6 +343,27 @@ describe("c2c doctor contract", () => {
       reason: "all_checks_passed",
       nextAction: { type: "none" },
       conversation: null,
+    });
+  });
+
+  it("keeps an invalid requested workspace structured without inventing an identity", async () => {
+    const fixture = isolatedWorkspace("doctor-invalid-workspace");
+    dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
+    const missing = path.join(fixture.workspace, "missing");
+
+    const result = await runDoctor(
+      missing,
+      fixture.stateDir,
+      fixture.codexHome,
+      "--diagnose-only",
+      "--json"
+    );
+
+    expect(result.status).toBe(1);
+    expect(parseResult(result.stdout)).toMatchObject({
+      requestedWorkspace: { id: null, name: null },
+      activeWorkspace: null,
+      bridgeObservation: { state: "not_checked", reason: null },
     });
   });
 
@@ -1029,6 +1056,22 @@ describe("c2c doctor contract", () => {
     const tokenCount = bridge.authStore.tokenCount();
     const tunnel = bridge.tunnel.status();
 
+    const diagnosis = await runDoctor(
+      requestedRoot,
+      fixture.stateDir,
+      fixture.codexHome,
+      "--diagnose-only",
+      "--json"
+    );
+    expect(parseResult(diagnosis.stdout)).toMatchObject({
+      requestedWorkspace: {
+        id: new Workspace(requestedRoot).id,
+        name: new Workspace(requestedRoot).name,
+      },
+      activeWorkspace: { id: bridge.workspace.id, name: bridge.workspace.name },
+      bridgeObservation: { state: "healthy", reason: null },
+    });
+
     const repaired = await runDoctor(requestedRoot, fixture.stateDir, fixture.codexHome, "--json");
     expect(repaired.status).toBe(0);
     expect(parseResult(repaired.stdout)).toMatchObject({
@@ -1166,6 +1209,12 @@ describe("c2c doctor contract", () => {
       outcome: "busy",
       reason: "recovery_in_progress",
       safeRetry: true,
+      requestedWorkspace: {
+        id: new Workspace(secondRoot).id,
+        name: new Workspace(secondRoot).name,
+      },
+      activeWorkspace: null,
+      bridgeObservation: { state: "not_checked", reason: null },
       nextAction: { type: "retry_wait", reason: "recovery_in_progress" },
     });
 
@@ -1224,6 +1273,9 @@ describe("c2c doctor contract", () => {
       outcome: owner.outcome,
       reason: owner.reason,
       safeRetry: true,
+      requestedWorkspace: { id: workspace.id, name: workspace.name },
+      activeWorkspace: null,
+      bridgeObservation: { state: "not_checked", reason: null },
       nextAction: { type: "retry_wait", reason: owner.reason },
     });
     expect(fs.existsSync(path.join(fixture.stateDir, "runtime", "global.json"))).toBe(false);
@@ -1639,6 +1691,9 @@ describe("c2c doctor contract", () => {
       reason: "bridge_stopped",
       repairs: [],
       safeRetry: true,
+      requestedWorkspace: { id: workspace.id, name: workspace.name },
+      activeWorkspace: null,
+      bridgeObservation: { state: "stopped", reason: "runtime_missing" },
       nextAction: { type: "manual_recovery", reason: "bridge_stopped" },
     });
     expect(tree(fixture.stateDir)).toEqual(before);
@@ -1693,6 +1748,9 @@ describe("c2c doctor contract", () => {
       reason: "probe_inconclusive",
       repairs: [],
       safeRetry: true,
+      requestedWorkspace: { id: workspace.id, name: workspace.name },
+      activeWorkspace: null,
+      bridgeObservation: { state: "unknown", reason: "probe_failed" },
       nextAction: { type: "retry_wait", reason: "probe_inconclusive" },
     });
     expect(unknown.stdout).not.toContain("c2c_admin_should_never_appear");
