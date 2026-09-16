@@ -13,7 +13,7 @@ import {
   type RuntimeState,
 } from "../src/bridge/runtime.js";
 import { getDefaultStateDir, writeSecureJson } from "../src/config/paths.js";
-import { writeLastEndpoint } from "../src/config/endpoint.js";
+import { mcpUrlFromPublic, writeLastEndpoint } from "../src/config/endpoint.js";
 import { adminFetch, ensureBridge, stopBridge } from "../src/process/daemon.js";
 import { sessionFile, writeSession } from "../src/session/state.js";
 import type { TunnelDoctorReport, TunnelProvider, TunnelStatus } from "../src/tunnel/provider.js";
@@ -675,7 +675,7 @@ describe("c2c doctor contract", () => {
       workspaceId: first.workspace.id,
       port: first.port,
       publicUrl: started.url,
-      mcpUrl: `${started.url}/mcp`,
+      mcpUrl: mcpUrlFromPublic(started.url),
       connectorName: "Codex with ChatGPT",
     });
     writeSession(first.workspace.id, {
