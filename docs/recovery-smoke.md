@@ -52,7 +52,10 @@ ChatGPT behavior.
 Using real Codex tasks and redacted evidence, perform interleaved reads from two
 different projects in the order A-B-A-B-A. Restart the Bridge and configured
 Tunnel, repeat the sequence, and confirm each task still reads its own distinct
-file. With two tasks in one project, confirm their conversation URL and
+file. Before and after restart, have each task discuss or review a fact unique
+to its own project and record that the response uses the correct project
+context; successful MCP reads alone do not prove task-specific discussion or
+review. With two tasks in one project, confirm their conversation URL and
 checkpoint progress remain independent before and after restart. For a stable
 endpoint and valid grant, record that no new OAuth page appeared. Separately
 verify that unpair/revocation and an endpoint identity change reject old
