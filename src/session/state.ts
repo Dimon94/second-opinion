@@ -164,15 +164,15 @@ export function claimLegacySession(workspaceId: string, hostTaskId: string): Sav
   const ownerKey = taskSessionKey(workspaceId, hostTaskId);
   const current = readSession(workspaceId, hostTaskId);
   const legacy = readSession(workspaceId);
+  if (current && legacy && !isDeepStrictEqual(withoutUpdateTimes(current), withoutUpdateTimes(legacy))) {
+    throw new Error("this host task already has a different session");
+  }
   const existingClaim = readLegacyClaim(workspaceId);
   if (existingClaim?.ownerKey !== undefined && existingClaim.ownerKey !== ownerKey) {
     throw new Error("legacy session already belongs to another host task");
   }
   if (legacy) acquireLegacyClaim(workspaceId, ownerKey);
   if (current) {
-    if (legacy && !isDeepStrictEqual(withoutUpdateTimes(current), withoutUpdateTimes(legacy))) {
-      throw new Error("this host task already has a different session");
-    }
     if (legacy) fs.rmSync(sessionFile(workspaceId), { force: true });
     return current;
   }

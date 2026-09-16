@@ -180,6 +180,31 @@ describe("task-scoped session CLI", () => {
     expect(readSession(workspaceId)).toBeNull();
   }, 60_000);
 
+  it("leaves a conflicting legacy session available for another task", () => {
+    const stateDir = makeTmpDir("session-claim-conflict-state");
+    const workspace = makeTmpDir("session-claim-conflict-workspace");
+    dirs.push(stateDir, workspace);
+    process.env.C2C_STATE_DIR = stateDir;
+    const workspaceId = new Workspace(workspace).id;
+    writeSession(workspaceId, {
+      url: "https://chatgpt.com/c/legacy-conflict",
+      taskId: "legacy-protocol",
+      savedAt: "2026-01-01T00:00:00.000Z",
+    });
+    writeSession(workspaceId, {
+      url: "https://chatgpt.com/c/task-a-progress",
+      taskId: "task-a-protocol",
+      savedAt: "2026-01-02T00:00:00.000Z",
+    }, "task-a");
+
+    expect(runSession(stateDir, workspace, "task-a", "claim-legacy", "--json").status).toBe(1);
+    expect(readSession(workspaceId, "task-a")?.url).toBe("https://chatgpt.com/c/task-a-progress");
+    expect(readSession(workspaceId)?.url).toBe("https://chatgpt.com/c/legacy-conflict");
+    expect(runSession(stateDir, workspace, "task-b", "claim-legacy", "--json").status).toBe(0);
+    expect(readSession(workspaceId, "task-b")?.url).toBe("https://chatgpt.com/c/legacy-conflict");
+    expect(readSession(workspaceId)).toBeNull();
+  }, 60_000);
+
   it.each(["before-task-write", "after-task-write"] as const)(
     "recovers the unique owner after interruption %s",
     (point) => {
