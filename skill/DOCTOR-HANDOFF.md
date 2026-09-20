@@ -20,8 +20,10 @@ or fall back to a global/last-active workspace.
 The Connector endpoint returned by doctor is the session-routed `/mcp/session`
 entry. Before current-task `@Second Opinion` or a compatibility conversation
 calls it, the invoking Skill must mint a local bootstrap from the host
-`CODEX_THREAD_ID` and cwd. The caller consumes that value once with
-`bind_workspace`, keeps the returned `binding_token` private, and
+`CODEX_THREAD_ID` and cwd. Native callers consume it with `bind_workspace`.
+Browser Second Opinion callers retain bootstrap locally, obtain a read-only
+`connection_info` proof for its SHA-256 nonce, and pass both via stdin to local
+`binding authorize --json`. Both keep the returned `binding_token` private and
 includes it in every later `workspace_info` or `read_file` call. Missing or
 mismatched binding errors stop the flow; never retry through the legacy `/mcp`
 entry. Do not record, log, or echo either credential.
@@ -38,6 +40,7 @@ The table is normative. There is one `nextAction` per doctor result.
 | `replace_connector` | `built-in` | `user` | `no` | `rerun` |
 | `authorize_oauth` | `built-in` | `user` | `create` | `rerun` |
 | `refresh_oauth` | `none` | `no` | `no` | `rerun` |
+| `probe_oauth` | `built-in` | `no` | `no` | `rerun` |
 | `chatgpt_login` | `built-in` | `user` | `no` | `rerun` |
 | `open_conversation` | `built-in` | `no` | `no` | `verify` |
 | `create_conversation` | `built-in` | `no` | `no` | `verify` |
@@ -68,6 +71,14 @@ The table is normative. There is one `nextAction` per doctor result.
   `@Second Opinion` Connector once so its OAuth client can refresh the existing
   grant, then rerun Doctor with the same workspace. Preserve the existing
   pairing and require Doctor to prove authorization healthy before continuing.
+- `probe_oauth`: authorization was exchanged but has not reached a protected
+  resource. Make one read-only `workspace_info` call through the existing native
+  Connector with no binding token. If unavailable, use the task's dedicated Chat
+  with the same Connector and ask for that one call (maximum one completed turn,
+  ten minutes). `WORKSPACE_BINDING_REQUIRED` proves authentication only; it is
+  expected before binding. Rerun Doctor once. Continue only if authorization is
+  healthy; otherwise report the actual error and stop this probe cycle. Keep the
+  existing grant; neither re-pairing nor waiting alone proves protected access.
 - `chatgpt_login`: open `nextAction.page` and stop. The user completes login,
   MFA, CAPTCHA, or account selection.
 - `open_conversation`: browser compatibility only. Open `nextAction.page` in the existing C2C tab. If it is
@@ -86,8 +97,11 @@ The table is normative. There is one `nextAction` per doctor result.
 
 ## Browser and resume gates
 
-Use one foreground C2C tab in the built-in browser only; keep it open across
-pauses. There is no external browser fallback. Connector create/delete,
+Use one dedicated C2C tab per local host task in the built-in browser; keep it
+open across pauses. Resolve that task's saved URL, not the globally foreground
+tab. Sibling tasks in the same workspace also need distinct chats. On resume,
+re-read the task-scoped session and verify workspace identity with an actual
+bound read before sending business material. There is no external browser fallback. Connector create/delete,
 ChatGPT or Cloudflare login, MFA, CAPTCHA, OAuth consent, and administrator
 approval are visible HITL gates. Navigate and fill non-sensitive fields when
 the action permits, then stop before the gate and wait for the user.

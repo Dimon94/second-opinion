@@ -920,7 +920,7 @@ describe("c2c doctor contract", () => {
       expect(parseResult(result.stdout)).toMatchObject({
         outcome: retry ? "unknown" : "user_action_required",
         reason: retry
-          ? "probe_inconclusive"
+          ? "auth_probe_required"
           : failure === "invalid_client"
             ? "invalid_client"
             : "auth_required",
@@ -940,12 +940,32 @@ describe("c2c doctor contract", () => {
           recoverable: retry,
         },
         nextAction: retry
-          ? { type: "retry_wait" }
+          ? { type: "probe_oauth" }
           : { type: "authorize_oauth" },
       });
       expect(
         await adminFetch<{ pairingActive: boolean }>(readRuntimeState()!, "GET", "/admin/info")
       ).toMatchObject({ pairingActive: false });
+      if (failure === "unverified") {
+        const direct = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--direct", "--json");
+        expect(parseResult(direct.stdout)).toMatchObject({ nextAction: { type: "probe_oauth" } });
+        const probe = new Client({ name: "authorization-probe", version: "1" });
+        try {
+          await probe.connect(new StreamableHTTPClientTransport(new URL(`${started.url}/mcp/session`), {
+            requestInit: { headers: { Authorization: `Bearer ${tokens.accessToken}` } },
+          }));
+          const result = await probe.callTool({ name: "workspace_info", arguments: {}, _meta: { "openai/session": "authorization-probe-chat" } });
+          expect(result.isError).toBe(true);
+          expect(JSON.stringify(result)).toContain("WORKSPACE_BINDING_REQUIRED");
+          const after = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--direct", "--json");
+          expect(parseResult(after.stdout)).toMatchObject({
+            authorization: { state: "healthy", proof: "protected_resource" },
+            nextAction: { type: "none" },
+          });
+        } finally {
+          await probe.close();
+        }
+      }
     }
   );
 

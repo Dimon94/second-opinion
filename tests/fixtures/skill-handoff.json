@@ -30,6 +30,11 @@
     "policy": { "browser": "none", "pause": "no", "pairing": "no", "after": "rerun" }
   },
   {
+    "name": "OAuth protected-resource probe",
+    "doctor": { "outcome": "unknown", "reason": "auth_probe_required", "nextAction": { "type": "probe_oauth", "reason": "auth_probe_required" } },
+    "policy": { "browser": "built-in", "pause": "no", "pairing": "no", "after": "rerun" }
+  },
+  {
     "name": "ChatGPT login",
     "doctor": { "outcome": "user_action_required", "reason": "chatgpt_login_required", "nextAction": { "type": "chatgpt_login", "reason": "chatgpt_login_required", "page": "https://chatgpt.com/" } },
     "policy": { "browser": "built-in", "pause": "user", "pairing": "no", "after": "rerun" }
