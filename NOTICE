@@ -1,0 +1,11 @@
+Second Opinion
+
+Independently maintained by Dimon94.
+Derived from https://github.com/XiaoDuoYa/codex-with-chatgpt
+Original copyright: Copyright (c) 2026 codex-with-chatgpt contributors
+
+This fork substantially changes task/workspace routing, local binding authorization,
+recovery handling, asynchronous review notifications, and the agent Skill.
+It is not an official upstream release and is not endorsed by the upstream
+maintainers or OpenAI. The original MIT copyright and permission notice are
+preserved in LICENSE. Modifications in this fork are also distributed under MIT.

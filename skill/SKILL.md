@@ -8,7 +8,7 @@ description: >
 
 # Codex with ChatGPT setup
 
-Configure one machine-global `Second Opinion` Connector, then verify it from
+Configure one machine-global `Codex Workspace Connector` (older name: `Second Opinion`), then verify it from
 the current Codex project task with a task-scoped read-only workspace binding.
 
 ## Required reference
@@ -24,6 +24,13 @@ Dispatch only its `nextAction`; do not infer recovery state from other fields.
 - Run workspace binding commands from `<current-project-root>`.
 
 ## First setup
+
+For the Second Opinion browser workflow, use the prerequisites and tunnel setup
+below, then run Doctor without `--direct` and follow its handoff. Complete the
+Chat handshake and real file read using `skills/second-opinion/SKILL.md` in this
+checkout; the direct Connector checks in steps 5–7 are for the native workflow,
+not an additional prerequisite for browser Chat. Keep the fork's checkout and
+origin; updating does not authorize replacing it with upstream.
 
 1. Run `c2c update-check --json` and `c2c sandbox-allow --json`.
 2. Ensure Node.js >= 20, Git, and `cloudflared`; build with
@@ -65,9 +72,9 @@ pairing, or edit a Connector.
 
 ## Browser C2C compatibility
 
-Legacy ChatGPT Web conversations remain available only when explicitly
-requested. Run doctor without `--direct` and follow its conversation action and
-`docs/protocol.md`. This path is not #13 direct-host acceptance. Its random C2C
+For ChatGPT Web Second Opinion, read `skills/second-opinion/SKILL.md` in this
+checkout. Run doctor without `--direct` and follow its conversation action.
+This path is not #13 direct-host acceptance. Its random C2C
 `TASK_ID` never owns a local binding; binding commands always use the current
 host `CODEX_THREAD_ID` and cwd implicitly.
 

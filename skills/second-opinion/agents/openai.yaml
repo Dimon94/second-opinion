@@ -1,0 +1,4 @@
+interface:
+  display_name: "Second Opinion"
+  short_description: "通过网页 Pro 获取独立评议，校验工作区绑定并异步通知原 Codex 任务"
+  default_prompt: "使用 $second-opinion，让 ChatGPT 网页 Pro 读取当前项目并独立评议我的方案，读回结果并保留分歧。"
