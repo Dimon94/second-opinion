@@ -104,8 +104,11 @@ function readLegacyClaim(workspaceId: string): LegacySessionClaim | null {
 }
 
 function acquireLegacyClaim(workspaceId: string, ownerKey: string): void {
-  const root = ensureDir(path.dirname(legacyClaimDir(workspaceId)));
-  const active = legacyClaimDir(workspaceId);
+  acquireOwnerClaim(legacyClaimDir(workspaceId), ownerKey);
+}
+
+function acquireOwnerClaim(active: string, ownerKey: string): void {
+  const root = ensureDir(path.dirname(active));
   const candidate = path.join(root, `.claim-${process.pid}-${randomUUID()}`);
   ensureDir(candidate);
   writeSecureJson(path.join(candidate, "claim.json"), { version: 1, ownerKey } satisfies LegacySessionClaim);
@@ -116,9 +119,35 @@ function acquireLegacyClaim(workspaceId: string, ownerKey: string): void {
   } finally {
     fs.rmSync(candidate, { recursive: true, force: true });
   }
-  const claim = readLegacyClaim(workspaceId);
-  if (!claim) throw new Error("legacy session ownership cannot be verified");
-  if (claim.ownerKey !== ownerKey) throw new Error("legacy session already belongs to another host task");
+  const claim = readJsonIfExists<LegacySessionClaim>(path.join(active, "claim.json"));
+  if (claim?.version !== 1 || !validOwnerKey(claim.ownerKey)) throw new Error("session ownership cannot be verified");
+  if (claim.ownerKey !== ownerKey) throw new Error("session already belongs to another host task");
+}
+
+function validOwnerKey(value: string): boolean {
+  return /^[a-f0-9]{64}$/.test(value);
+}
+
+function checkChatOwner(url: string, ownerKey: string, acquire = false): void {
+  const tasks = path.join(getStateDir(), "sessions", "tasks");
+  // Existing pre-claim records must also be checked; ambiguity fails closed.
+  if (fs.existsSync(tasks)) for (const entry of fs.readdirSync(tasks)) {
+    if (entry === `${ownerKey}.json` || !/^[a-f0-9]{64}\.json$/.test(entry)) continue;
+    const other = readJsonIfExists<SavedSession>(path.join(tasks, entry));
+    if (!other) throw new Error("session ownership cannot be verified");
+    if (other.url && normalizeConversationUrl(other.url) === url) {
+      throw new Error("conversation already belongs to another host task");
+    }
+  }
+  const key = createHash("sha256").update(url).digest("hex");
+  const active = path.join(getStateDir(), "sessions", "chat-claims", key);
+  if (acquire) acquireOwnerClaim(active, ownerKey);
+  else if (fs.existsSync(active)) {
+    const claim = readJsonIfExists<LegacySessionClaim>(path.join(active, "claim.json"));
+    if (claim?.version !== 1 || claim.ownerKey !== ownerKey) {
+      throw new Error("conversation ownership cannot be verified for this host task");
+    }
+  }
 }
 
 /** hostTaskId comes from the local host, never the conversation's protocol taskId. */
@@ -133,12 +162,14 @@ export function readSession(workspaceId: string, hostTaskId?: string): SavedSess
   const session = readJsonIfExists<SavedSession>(sessionFile(workspaceId, hostTaskId));
   if (!session) return null;
   const url = session.url ? normalizeConversationUrl(session.url) : null;
+  if (url && hostTaskId !== undefined) checkChatOwner(url, taskSessionKey(workspaceId, hostTaskId));
   return { ...session, url: url ?? undefined };
 }
 
 export function writeSession(workspaceId: string, session: SavedSession, hostTaskId?: string): SavedSession {
   const url = session.url ? normalizeConversationUrl(session.url) : null;
   if (session.url && !url) throw new Error("conversation URL must look like https://chatgpt.com/c/…");
+  if (url && hostTaskId !== undefined) checkChatOwner(url, taskSessionKey(workspaceId, hostTaskId), true);
   const normalized = { ...session, url: url ?? undefined };
   const previous = readJsonIfExists<SavedSession>(sessionFile(workspaceId, hostTaskId));
   if (previous && isDeepStrictEqual(withoutUpdateTimes(previous), withoutUpdateTimes(normalized))) {

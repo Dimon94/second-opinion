@@ -328,6 +328,44 @@ function hostTaskId(): string {
 
 const bindingCmd = program.command("binding").description("Authorize a task-scoped workspace binding");
 
+const reviewCmd = program.command("review").description("Manage task-scoped asynchronous Second Opinion rounds");
+for (const action of ["arm", "status", "ack", "cancel"]) {
+  reviewCmd.command(action).option("--id <id>", "exact review ID for ack/cancel").option("--json", "machine-readable output", false)
+    .action(async (opts: { id?: string; json: boolean }) => {
+      try {
+        const taskId = hostTaskId();
+        const observation = await findBridgeObservation();
+        if (observation.state !== "healthy") throw new Error("A healthy Bridge is required.");
+        const result = await adminFetch(observation.runtime, "POST", "/admin/reviews", 20000,
+          { action, id: opts.id, taskId, workspaceRoot: process.cwd() });
+        say(JSON.stringify(result));
+      } catch (error) { handleCliError(error, opts.json); }
+    });
+}
+
+bindingCmd.command("authorize")
+  .description("Authorize locally from JSON stdin: bootstrapToken and connectionProof")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { json: boolean }) => {
+    try {
+      const taskId = hostTaskId();
+      if (process.stdin.isTTY) throw new Error("Pass authorization material through JSON stdin, never command arguments.");
+      let input = "";
+      for await (const chunk of process.stdin) {
+        input += chunk.toString();
+        if (input.length > 16384) throw new Error("Authorization input too large.");
+      }
+      let body: { bootstrapToken: string; connectionProof: string };
+      try { body = JSON.parse(input); } catch { throw new Error("Invalid authorization JSON."); }
+      const observation = await findBridgeObservation();
+      if (observation.state !== "healthy") throw new Error("A healthy Bridge is required before authorization.");
+      const result = await adminFetch<{ binding_token: string }>(observation.runtime, "POST", "/admin/bindings/authorize", 60_000,
+        { bootstrapToken: body.bootstrapToken, connectionProof: body.connectionProof, workspaceRoot: process.cwd(), taskId });
+      if (opts.json) say(JSON.stringify({ ok: true, ...result }));
+      else say(result.binding_token);
+    } catch (error) { handleCliError(error, opts.json); }
+  });
+
 bindingCmd
   .command("bootstrap")
   .option("--json", "machine-readable output", false)
@@ -363,7 +401,7 @@ bindingCmd
         "POST",
         "/admin/bindings/unbind",
         60_000,
-        { taskId }
+        { taskId, workspaceRoot: process.cwd() }
       );
       if (opts.json) say(JSON.stringify({ ok: true, ...result }));
       else check(`已解绑 ${result.removed} 个会话工作区`);

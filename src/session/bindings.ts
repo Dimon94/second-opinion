@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { ensureDir, getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
@@ -77,6 +77,8 @@ function validStoredBindings(value: unknown): value is StoredBindings {
 }
 
 export class WorkspaceBindingStore {
+  // Restart invalidates unfinished proofs; existing bindings still persist.
+  private readonly proofKey = randomBytes(32);
   private bootstraps: BootstrapRecord[] = [];
   private bindings: BindingRecord[] = [];
   private readonly file: string;
@@ -112,6 +114,31 @@ export class WorkspaceBindingStore {
     return { bootstrapToken, expiresAt };
   }
 
+  connectionInfo(principal: OAuthPrincipal, sessionId: string, nonce: string): { connection_proof: string } {
+    if (!validHash(nonce)) throw new WorkspaceBindingError("INVALID_NONCE", "A local challenge hash is required.");
+    // AuthInfo may carry a raw OAuth token despite its narrower static type.
+    const identity = { clientId: principal.clientId, scopes: scopes(principal.scopes) };
+    const payload = Buffer.from(JSON.stringify({ principal: identity, sessionId, nonce, expiresAt: Date.now() + BOOTSTRAP_TTL_MS })).toString("base64url");
+    const signature = createHmac("sha256", this.proofKey).update(payload).digest("base64url");
+    return { connection_proof: `c2c_ctx_${payload}.${signature}` };
+  }
+
+  authorize(bootstrapToken: string, connectionProof: string, workspaceRoot: string, taskId: string): { binding_token: string } {
+    const invalid = () => new WorkspaceBindingError("INVALID_CONNECTION_PROOF", "Connection proof is invalid, stale, or does not match the local challenge and owner.");
+    if (connectionProof.length > 8192 || !connectionProof.startsWith("c2c_ctx_")) throw invalid();
+    const [payload, signature, extra] = connectionProof.slice(8).split(".");
+    if (!payload || !signature || extra !== undefined) throw invalid();
+    const expected = createHmac("sha256", this.proofKey).update(payload).digest("base64url");
+    if (signature.length !== expected.length || !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) throw invalid();
+    let proof: { principal: OAuthPrincipal; sessionId: string; nonce: string; expiresAt: number };
+    try { proof = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")); } catch { throw invalid(); }
+    const bootstrap = this.bootstraps.find((record) => record.hash === hash(bootstrapToken));
+    if (!bootstrap || bootstrap.expiresAt <= Date.now() || proof.expiresAt <= Date.now() ||
+      proof.nonce !== hash(bootstrapToken) || bootstrap.taskHash !== hash(taskId.trim()) ||
+      bootstrap.workspaceRoot !== new Workspace(workspaceRoot).root) throw invalid();
+    return this.redeem(bootstrapToken, proof.principal, proof.sessionId);
+  }
+
   redeem(bootstrapToken: string, principal: OAuthPrincipal, sessionId: string): { binding_token: string } {
     this.pruneExpired();
     if (!validSecret(bootstrapToken, "c2c_boot")) {
@@ -119,7 +146,16 @@ export class WorkspaceBindingStore {
     }
     const index = this.bootstraps.findIndex((record) => record.hash === hash(bootstrapToken));
     if (index < 0) throw new WorkspaceBindingError("INVALID_BOOTSTRAP", "The workspace bootstrap is invalid or expired.");
-    const [bootstrap] = this.bootstraps.splice(index, 1);
+    const bootstrap = this.bootstraps[index];
+    const sessionHash = hash(sessionId);
+    const occupied = this.bindings.some((binding) =>
+      binding.clientId === principal.clientId && binding.sessionHash === sessionHash &&
+      (binding.taskHash !== bootstrap.taskHash || binding.workspaceRoot !== bootstrap.workspaceRoot)
+    );
+    if (occupied) {
+      throw new WorkspaceBindingError("SESSION_ALREADY_BOUND", "This session is already bound to another local task or workspace. Use that task's own conversation.");
+    }
+    this.bootstraps.splice(index, 1);
     const bindingToken = secret("c2c_bind");
     this.bindings.push({
       hash: hash(bindingToken),
@@ -127,7 +163,7 @@ export class WorkspaceBindingStore {
       taskHash: bootstrap.taskHash,
       clientId: principal.clientId,
       scopes: scopes(principal.scopes),
-      sessionHash: hash(sessionId),
+      sessionHash,
       createdAt: new Date().toISOString(),
     });
     this.save();
@@ -147,6 +183,12 @@ export class WorkspaceBindingStore {
     ) {
       throw new WorkspaceBindingError("WORKSPACE_BINDING_MISMATCH", "The workspace binding does not match this session.");
     }
+    if (this.bindings.some((other) =>
+      other.clientId === record.clientId && other.sessionHash === record.sessionHash &&
+      (other.taskHash !== record.taskHash || other.workspaceRoot !== record.workspaceRoot)
+    )) {
+      throw new WorkspaceBindingError("SESSION_ALREADY_BOUND", "This session is already bound to multiple local owners; use a separate conversation.");
+    }
     try {
       const workspace = new Workspace(record.workspaceRoot);
       if (workspace.root !== record.workspaceRoot) throw new Error("Workspace root changed");
@@ -156,13 +198,20 @@ export class WorkspaceBindingStore {
     }
   }
 
-  unbindTask(taskId: string): number {
+  identify(bindingToken: string, principal: OAuthPrincipal, sessionId: string): { workspaceRoot: string; taskHash: string } {
+    const workspace = this.resolve(bindingToken, principal, sessionId);
+    const record = this.bindings.find((candidate) => candidate.hash === hash(bindingToken))!;
+    return { workspaceRoot: workspace.root, taskHash: record.taskHash };
+  }
+
+  unbindTask(taskId: string, workspaceRoot: string): number {
     const owner = taskId.trim();
     if (!owner || owner.length > 200) throw new WorkspaceBindingError("INVALID_TASK", "A valid local task id is required.");
     const taskHash = hash(owner);
+    const root = new Workspace(workspaceRoot).root;
     const before = this.bindings.length;
-    this.bindings = this.bindings.filter((binding) => binding.taskHash !== taskHash);
-    this.bootstraps = this.bootstraps.filter((bootstrap) => bootstrap.taskHash !== taskHash);
+    this.bindings = this.bindings.filter((binding) => binding.taskHash !== taskHash || binding.workspaceRoot !== root);
+    this.bootstraps = this.bootstraps.filter((bootstrap) => bootstrap.taskHash !== taskHash || bootstrap.workspaceRoot !== root);
     const removed = before - this.bindings.length;
     this.save();
     return removed;

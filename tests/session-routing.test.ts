@@ -3,6 +3,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { createHash } from "node:crypto";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { describe, expect, it } from "vitest";
@@ -31,7 +32,7 @@ function issueAccessToken(bridge: Bridge, scopes = ALL_SCOPES): string {
 async function sessionClient(bridge: Bridge, accessToken: string): Promise<Client> {
   const client = new Client({ name: "session-routing-test", version: "1.0.0" });
   await client.connect(new StreamableHTTPClientTransport(new URL(mcpUrlFromPublic(bridge.localBaseUrl())!), {
-    requestInit: { headers: { authorization: `Bearer ${accessToken}` } },
+    requestInit: { headers: { authorization: `Bearer ${accessToken}`, connection: "close" } },
   }));
   return client;
 }
@@ -46,6 +47,99 @@ function data<T>(result: { content?: unknown }): T {
 }
 
 describe("session-routed MCP entry", () => {
+  it("authorizes locally from a read-only remote session proof without consuming it remotely", async () => {
+    const stateDir = isolateStateDir();
+    const root = makeTmpDir("local-authorize");
+    write(root, "identity.txt", "expected project");
+    const bridge = await startBridge({ workspaceRoot: root, port: 0, persistRuntime: false });
+    const client = await sessionClient(bridge, issueAccessToken(bridge));
+    try {
+      const boot = bridge.bindings.mint(root, "host-a");
+      const nonce = createHash("sha256").update(boot.bootstrapToken).digest("hex");
+      const before = fs.readFileSync(path.join(stateDir, "bindings/store.json"), "utf8");
+      const probe = await call(client, "remote-a", "connection_info", { nonce });
+      expect(probe.isError).not.toBe(true);
+      expect(fs.readFileSync(path.join(stateDir, "bindings/store.json"), "utf8")).toBe(before);
+      const proof = data<{ connection_proof: string }>(probe).connection_proof;
+      const context = JSON.parse(Buffer.from(proof.slice(8).split(".")[0], "base64url").toString("utf8"));
+      expect(Object.keys(context.principal).sort()).toEqual(["clientId", "scopes"]);
+      const authorize = (contextProof: string, taskId = "host-a") => fetch(`${bridge.localBaseUrl()}/admin/bindings/authorize`, {
+        method: "POST", headers: { authorization: `Bearer ${bridge.adminToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ bootstrapToken: boot.bootstrapToken, connectionProof: contextProof, taskId, workspaceRoot: root }),
+      });
+      expect((await authorize(proof, "host-b")).status).toBe(400);
+      expect((await authorize(proof + "x")).status).toBe(400);
+      const wrong = data<{ connection_proof: string }>(await call(client, "remote-a", "connection_info", { nonce: "0".repeat(64) }));
+      expect((await authorize(wrong.connection_proof)).status).toBe(400);
+      const response = await authorize(proof);
+      expect(response.status).toBe(200);
+      const bound = await response.json() as { binding_token: string };
+      expect((await authorize(proof)).status).toBe(400);
+      const args = { binding_token: bound.binding_token, path: "identity.txt" };
+      expect(data<{ content: string }>(await call(client, "remote-a", "read_file", args)).content).toBe("expected project");
+      expect((await call(client, "remote-b", "read_file", args)).isError).toBe(true);
+    } finally {
+      await client.close(); await bridge.close();
+      [stateDir, root].forEach(cleanup); delete process.env.C2C_STATE_DIR;
+    }
+  });
+
+  it("routes four concurrent project/task lanes and revalidates them after bridge restart", async () => {
+    const stateDir = isolateStateDir();
+    const roots = [makeTmpDir("four-a"), makeTmpDir("four-b")];
+    roots.forEach((root, i) => write(root, "identity.txt", `project-${i}`));
+    const options = { workspaceRoot: roots[0], port: 0, persistRuntime: false,
+      authStoreFile: path.join(stateDir, "auth.json") };
+    let bridge = await startBridge(options);
+    const access = issueAccessToken(bridge);
+    let client = await sessionClient(bridge, access);
+    try {
+      const lanes = await Promise.all([0, 1, 0, 1].map(async (project, i) => {
+        const session = `remote-${i}`;
+        const bootstrap = bridge.bindings.mint(roots[project], `host-${i}`);
+        const nonce = createHash("sha256").update(bootstrap.bootstrapToken).digest("hex");
+        const probe = data<{ connection_proof: string }>(await call(client, session, "connection_info", { nonce }));
+        const response = await fetch(`${bridge.localBaseUrl()}/admin/bindings/authorize`, {
+          method: "POST", headers: { authorization: `Bearer ${bridge.adminToken}`, "content-type": "application/json" },
+          body: JSON.stringify({ bootstrapToken: bootstrap.bootstrapToken, connectionProof: probe.connection_proof,
+            workspaceRoot: roots[project], taskId: `host-${i}` }),
+        });
+        expect(response.status).toBe(200);
+        const bound = await response.json() as { binding_token: string };
+        return { project, session, token: bound.binding_token };
+      }));
+      const verify = async () => {
+        await Promise.all(lanes.map(async (lane) => {
+          const info = await call(client, lane.session, "workspace_info", { binding_token: lane.token });
+          expect(data<{ workspaceId: string }>(info).workspaceId).toBe(infoId(roots[lane.project]));
+          const file = await call(client, lane.session, "read_file", { binding_token: lane.token, path: "identity.txt" });
+          expect(data<{ content: string }>(file).content).toBe(`project-${lane.project}`);
+          for (const other of lanes.filter((other) => other !== lane)) {
+            const wrong = await call(client, other.session, "read_file", { binding_token: lane.token, path: "identity.txt" });
+            expect(wrong.isError).toBe(true);
+            expect(JSON.stringify(wrong)).toContain("WORKSPACE_BINDING_MISMATCH");
+          }
+        }));
+      };
+      await verify();
+      options.port = bridge.port;
+      await client.close();
+      await bridge.close();
+      bridge = await startBridge(options);
+      client = await sessionClient(bridge, access);
+      await verify();
+      const misplaced = bridge.bindings.mint(roots[0], "host-2");
+      const rejected = await call(client, lanes[0].session, "bind_workspace", { bootstrap_token: misplaced.bootstrapToken });
+      expect(rejected.isError).toBe(true);
+      expect(JSON.stringify(rejected)).toContain("SESSION_ALREADY_BOUND");
+    } finally {
+      await client.close();
+      await bridge.close();
+      [stateDir, ...roots].forEach(cleanup);
+      delete process.env.C2C_STATE_DIR;
+    }
+  });
+
   it("binds two local roots and rejects missing, mismatched, replayed and revoked credentials", async () => {
     const stateDir = isolateStateDir();
     const rootA = makeTmpDir("binding-a");
@@ -81,10 +175,10 @@ describe("session-routed MCP entry", () => {
     try {
       const tools = (await client.listTools()).tools;
       expect(tools.map((tool) => tool.name).sort()).toEqual([
-        "bind_workspace", "execution_output", "execution_summary", "git_diff", "git_status",
+        "bind_workspace", "complete_review", "connection_info", "execution_output", "execution_summary", "git_diff", "git_status",
         "list_directory", "read_file", "search_workspace", "test_status", "workspace_info",
       ]);
-      for (const tool of tools.filter((candidate) => candidate.name !== "bind_workspace")) {
+      for (const tool of tools.filter((candidate) => !["bind_workspace", "connection_info"].includes(candidate.name))) {
         expect((tool.inputSchema as { properties?: Record<string, unknown> }).properties).toHaveProperty("binding_token");
       }
 
@@ -233,11 +327,17 @@ describe("session-routed MCP entry", () => {
       expect(persisted).not.toContain(boundA.binding_token);
       expect(persisted).toContain(rootA);
 
+      const sameOwnerBootstrap = await (await admin("/admin/bindings/bootstrap", { workspaceRoot: rootB, taskId: "task-a" })).json();
+      const sameOwnerBinding = data<{ binding_token: string }>(await call(client, "session-a-in-b", "bind_workspace", { bootstrap_token: sameOwnerBootstrap.bootstrapToken }));
+      expect((await admin("/admin/bindings/unbind", { taskId: "task-a" })).status).toBe(400);
       const cliUnbind = await execFileAsync(process.execPath, [
         "--import", "tsx", cli, "binding", "unbind", "--json",
       ], { cwd: rootA, encoding: "utf8", env: { ...process.env, CODEX_THREAD_ID: "task-a" } });
       expect(cliUnbind.stderr).toBe("");
       expect(JSON.parse(cliUnbind.stdout)).toMatchObject({ ok: true, removed: 1 });
+      expect(data<{ workspaceId: string }>(await call(client, "session-a-in-b", "workspace_info", {
+        binding_token: sameOwnerBinding.binding_token,
+      })).workspaceId).toBe(infoB.workspaceId);
       const unbound = await call(client, "session-a", "workspace_info", {
         binding_token: boundA.binding_token,
       });

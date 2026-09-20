@@ -479,6 +479,10 @@ describe("authorization + token flow", () => {
     expect(page).toContain("workspaces authorized by local Codex on this computer");
     expect(page).toContain("Authorization started from:");
     expect(page).not.toContain("requesting access to workspace");
+    pageRequest.searchParams.set("scope", "workspace.read review.submit");
+    const reviewPage = await (await fetch(pageRequest)).text();
+    expect(reviewPage).toContain("Save review results and send a message that starts the locally authorized Codex task");
+    expect(reviewPage).not.toContain("requesting read-only access");
   });
 
   it("rejects a wrong pairing code", async () => {

@@ -9,6 +9,7 @@ const LEVELS: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error:
  * Secret redaction. Logs must never contain tokens, pairing codes or credentials.
  */
 const REDACT_PATTERNS: RegExp[] = [
+  /c2c_ctx_[A-Za-z0-9_.-]+/g,
   /c2c_(?:at|rt|ac|admin|boot|bind)_[A-Za-z0-9_-]+/g,
   /(authorization"?\s*[:=]\s*"?bearer\s+)[^\s"']+/gi,
   /((?:access_token|refresh_token|client_secret|code_verifier|code|token)"?\s*[:=]\s*"?)[A-Za-z0-9._~+/-]{16,}/gi,

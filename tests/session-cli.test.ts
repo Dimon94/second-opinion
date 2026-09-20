@@ -85,6 +85,21 @@ describe("task-scoped session CLI", () => {
     delete process.env.C2C_STATE_DIR;
   });
 
+  it("atomically reserves one chat URL for only one of four concurrent owners", async () => {
+    const stateDir = makeTmpDir("chat-owner-race");
+    const roots = [makeTmpDir("chat-owner-a"), makeTmpDir("chat-owner-b")];
+    dirs.push(stateDir, ...roots);
+    const statuses = await Promise.all([0, 1, 0, 1].map((project, i) => new Promise<number | null>((resolve, reject) => {
+      const child = spawn(process.execPath, ["--import", "tsx", cli, "session", "set", "-w", roots[project],
+        "--url", "https://chatgpt.com/c/race-chat"], {
+        env: { ...process.env, C2C_STATE_DIR: stateDir, CODEX_THREAD_ID: `racer-${i}` }, stdio: "ignore",
+      });
+      child.once("error", reject);
+      child.once("close", resolve);
+    })));
+    expect(statuses.filter((status) => status === 0)).toHaveLength(1);
+  });
+
   it("isolates same-workspace tasks and requires an explicit legacy choice", () => {
     const stateDir = makeTmpDir("session-cli-state");
     const workspace = makeTmpDir("session-cli-workspace");

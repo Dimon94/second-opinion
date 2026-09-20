@@ -1,6 +1,7 @@
 import express, { type Request, type Response, type NextFunction } from "express";
 import type { Server } from "node:http";
 import { randomBytes } from "node:crypto";
+import path from "node:path";
 import { Workspace } from "../workspace/manager.js";
 import { AuthStore } from "../auth/store.js";
 import { createOAuthRouter } from "../auth/oauth.js";
@@ -9,7 +10,8 @@ import { PairingManager } from "../pairing/manager.js";
 import { createMcpServer } from "../mcp/server.js";
 import { createSessionMcpServer } from "../mcp/session-server.js";
 import { createMcpHttpHandler } from "../mcp/http.js";
-import { WorkspaceBindingStore } from "../session/bindings.js";
+import { WorkspaceBindingError, WorkspaceBindingStore } from "../session/bindings.js";
+import { ReviewStore } from "../session/reviews.js";
 import { CloudflaredQuickTunnel } from "../tunnel/cloudflared.js";
 import { CloudflaredNamedTunnel } from "../tunnel/cloudflared-named.js";
 import type { TunnelProvider } from "../tunnel/provider.js";
@@ -49,6 +51,7 @@ export interface BridgeOptions {
   accessTokenTtlMs?: number;
   bindingStoreFile?: string;
   bindingBootstrapTtlMs?: number;
+  reviewQueue?: ConstructorParameters<typeof ReviewStore>[1];
 }
 
 export interface Bridge {
@@ -98,6 +101,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   }
 
   const bindings = new WorkspaceBindingStore({ file: opts.bindingStoreFile, bootstrapTtlMs: opts.bindingBootstrapTtlMs });
+  const reviews = new ReviewStore(undefined, opts.reviewQueue);
   const authStore = new AuthStore({ file: opts.authStoreFile, onRevoke: () => bindings.clear() });
   const pairing = new PairingManager(workspace.id, { ttlMs: opts.pairingTtlMs });
   let tunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger);
@@ -145,7 +149,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       void mcpHandler(req, res);
     }
   );
-  const sessionMcpHandler = createMcpHttpHandler(() => createSessionMcpServer(bindings, logger), logger);
+  const sessionMcpHandler = createMcpHttpHandler(() => createSessionMcpServer(bindings, logger, reviews), logger);
   app.all(
     "/mcp/session",
     express.json({ limit: "8mb" }),
@@ -170,6 +174,33 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     }
     next();
   };
+
+  app.post("/admin/reviews", adminGuard, express.json({ limit: "8kb" }), (req: Request, res: Response) => {
+    const body = req.body;
+    if (typeof body?.workspaceRoot !== "string" || !path.isAbsolute(body.workspaceRoot) || typeof body?.taskId !== "string" || typeof body?.action !== "string") {
+      res.status(400).json({ error: "INVALID_REVIEW_REQUEST" }); return;
+    }
+    try { res.json({ review: reviews.local(body.action, body.workspaceRoot, body.taskId, body.id) }); }
+    catch (error) { res.status(400).json({ error: error instanceof WorkspaceBindingError ? error.code : "INVALID_REVIEW_STATE" }); }
+  });
+
+  app.post(
+    "/admin/bindings/authorize",
+    adminGuard,
+    express.json({ limit: "16kb" }),
+    (req: Request, res: Response) => {
+      const body = req.body;
+      if (!["bootstrapToken", "connectionProof", "workspaceRoot", "taskId"].every((key) => typeof body?.[key] === "string")) {
+        res.status(400).json({ error: "INVALID_CONNECTION_PROOF" }); return;
+      }
+      try {
+        res.json(bindings.authorize(body.bootstrapToken, body.connectionProof, body.workspaceRoot, body.taskId));
+      } catch (error) {
+        res.status(400).json({ error: error instanceof WorkspaceBindingError ? error.code : "CONNECTION_AUTHORIZATION_FAILED",
+          message: error instanceof WorkspaceBindingError ? error.message : "Check the fresh proof, local challenge, owner and target conversation." });
+      }
+    }
+  );
 
   app.post(
     "/admin/bindings/bootstrap",
@@ -200,7 +231,11 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
         res.status(400).json({ error: "invalid_task", message: "taskId is required" });
         return;
       }
-      res.json({ removed: bindings.unbindTask(req.body.taskId) });
+      if (typeof req.body?.workspaceRoot !== "string" || !path.isAbsolute(req.body.workspaceRoot)) {
+        res.status(400).json({ error: "invalid_workspace", message: "workspaceRoot is required" });
+        return;
+      }
+      res.json({ removed: bindings.unbindTask(req.body.taskId, req.body.workspaceRoot) });
     }
   );
 

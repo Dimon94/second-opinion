@@ -87,6 +87,7 @@ function pairingPage(opts: {
     "workspace.search": "Search this workspace",
     "git.read": "Read git status and diffs",
     "execution.read": "Read Codex execution summaries",
+    "review.submit": "Save review results and send a message that starts the locally authorized Codex task",
     offline_access: "Stay connected between sessions",
   };
   const scopeList = opts.scopes
@@ -130,7 +131,7 @@ function pairingPage(opts: {
 <body>
 <div class="card">
   <h1>${escapedProductName}</h1>
-  <p class="sub">ChatGPT is requesting read-only access to workspaces authorized by local Codex on this computer.</p>
+  <p class="sub">ChatGPT is requesting the permissions listed below for workspaces authorized by local Codex on this computer.</p>
   <p class="sub">Authorization started from: <strong>${escapedWorkspaceName}</strong></p>
   <ul>${scopeList}</ul>
   <form method="POST" action="authorize">

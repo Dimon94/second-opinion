@@ -59,6 +59,19 @@ masquerades as revocation.
 
 ## Storage
 
+### Conversation ownership
+
+Local conversation pointers are keyed by workspace and host task, not by the
+message's protocol task ID. A normalized ChatGPT URL is atomically reserved for
+one such owner; reads reject conflicting older task records. Reservations are
+retained when a pointer changes, so clearing a pointer does not transfer the old
+conversation to another task. Ambiguous legacy records require explicit repair.
+On the MCP side, an already-bound OAuth client/session rejects a bootstrap from
+another task or root (`SESSION_ALREADY_BOUND`) before consuming it. Recovery
+must use the current task's own chat and recheck identity with a real bound read.
+These checks prevent accidental routing, not theft of a complete bearer credential
+set or authenticated proof of which visible ChatGPT URL emitted metadata.
+
 State lives under the OS-convention app dir
 (`~/Library/Application Support/codex-with-chatgpt` on macOS), directories 0700,
 files 0600. Named-hostname preference and tunnel metadata live there too
@@ -74,8 +87,28 @@ directory; neither is written to a workspace repository.
 than OS-keychain-based. Raw tokens are never written anywhere. Keychain
 integration is a V2 item.
 
-## What ChatGPT can never do (V1)
+## Restricted completion notifications
 
-Write files, delete files, run shell commands, commit, install packages —
-these tools do not exist on the server, so no prompt injection, scope bug, or
-UI confusion can enable them.
+Completion requires an explicit `review.submit` OAuth grant in addition to
+`workspace.read`. Existing read grants are not upgraded on refresh. The consent
+page states that review delivery saves results and starts the locally authorized
+Codex task. Missing write scope returns the official MCP OAuth challenge before
+any review mutation or queue dispatch. The installed SDK advertises tool scopes
+through ChatGPT's documented `_meta.securitySchemes` compatibility field.
+The tool is marked destructive because the sent message/started turn cannot be
+undone; bounded private routing retains `openWorldHint: false`.
+
+Workspace tools cannot write/delete project files, commit, install packages,
+or execute arbitrary commands. `complete_review` is explicitly a mutating tool:
+it persists bounded analysis in owner-only state and invokes the fixed local
+`codex queue` executable without a shell. Its target comes exclusively from a
+locally armed review matched to the authenticated workspace/task binding; remote
+arguments cannot choose a host, executable, path, or wakeup instructions.
+The result is untrusted data, never interpolated into the queued prompt.
+
+Each round has a unique ID, expiry, saved conversation/iteration check and an
+exclusive dispatch claim. Duplicate completion does not enqueue twice. Unknown
+dispatch failure remains uncertain; only definite executable-start failures
+permit retry. A notification is not permission for new work: the resumed task
+must validate its owner/round, read the original Chat, and honor the user's scope.
+Wakeup acceptance covers a running local Codex App, not sleep or remote hosts.

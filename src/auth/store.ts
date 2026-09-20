@@ -15,6 +15,7 @@ export const SUPPORTED_SCOPES = [
   "workspace.search",
   "git.read",
   "execution.read",
+  "review.submit",
   "offline_access",
 ] as const;
 
