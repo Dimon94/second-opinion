@@ -105,7 +105,7 @@ describe("resolveConversation", () => {
     });
     expect(view.mode).toBe("project");
     expect(view.projectReady).toBe(true);
-    expect(view.reuseSavedChat).toBe(false);
+    expect(view.reuseSavedChat).toBe(true);
     expect(view.connectorName).toBe("Codex with ChatGPT · Demo");
   });
 });

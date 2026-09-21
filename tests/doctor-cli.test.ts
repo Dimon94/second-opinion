@@ -720,7 +720,7 @@ describe("c2c doctor contract", () => {
     ).toMatchObject({ pairingActive: false });
   });
 
-  it("advances recoverable access expiry through a real refresh-capable conversation action", async () => {
+  it.each(["long-chat", "project"] as const)("advances recoverable access expiry through the saved %s conversation", async (conversationMode) => {
     const fixture = isolatedWorkspace("doctor-oauth-access-expired");
     dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
     process.env.C2C_STATE_DIR = fixture.stateDir;
@@ -754,7 +754,8 @@ describe("c2c doctor contract", () => {
     });
     writeSession(first.workspace.id, {
       url: conversationUrl,
-      conversationMode: "long-chat",
+      conversationMode,
+      projectUrl: "https://chatgpt.com/g/g-p-test/project",
       connectorName: "Codex with ChatGPT",
       savedAt: new Date().toISOString(),
     }, TEST_TASK_ID);
@@ -973,7 +974,7 @@ describe("c2c doctor contract", () => {
     }
   );
 
-  it("returns a normalized workspace-scoped action for a saved long chat", async () => {
+  it.each(["long-chat", "project"] as const)("returns a normalized workspace-scoped action for a saved %s chat", async (conversationMode) => {
     const fixture = isolatedWorkspace("doctor-conversation");
     dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
     process.env.C2C_STATE_DIR = fixture.stateDir;
@@ -981,7 +982,8 @@ describe("c2c doctor contract", () => {
     bridges.push(bridge);
     writeSecureJson(sessionFile(bridge.workspace.id, TEST_TASK_ID), {
       url: "https://chatgpt.com/c/WEB:saved-chat?model=auto",
-      conversationMode: "long-chat",
+      conversationMode,
+      projectUrl: "https://chatgpt.com/g/g-p-test/project",
       connectorName: "Codex with ChatGPT",
       checkpoint: {
         taskId: "c2c_ab12",
@@ -999,7 +1001,7 @@ describe("c2c doctor contract", () => {
     expect(parseResult(result.stdout)).toMatchObject({
       conversation: {
         workspaceId: bridge.workspace.id,
-        mode: "long-chat",
+        mode: conversationMode,
         chatUrl: "https://chatgpt.com/c/saved-chat",
         connectorName: "Codex with ChatGPT",
         reuseSavedChat: true,

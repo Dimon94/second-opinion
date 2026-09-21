@@ -331,7 +331,7 @@ export function createDoctorResult(input: {
       };
     }
     const conversation = input.conversation;
-    const page = conversation?.mode === "project" ? conversation.projectUrl : conversation?.chatUrl;
+    const page = conversation?.chatUrl ?? (conversation?.mode === "project" ? conversation.projectUrl : null);
     return {
       ...base,
       outcome: "unknown",
@@ -397,7 +397,7 @@ export function createDoctorResult(input: {
         nextAction: { type: "manual_recovery", reason: "checks_failed" },
       };
     }
-    const page = conversation.mode === "project" ? conversation.projectUrl : conversation.chatUrl;
+    const page = conversation.chatUrl ?? (conversation.mode === "project" ? conversation.projectUrl : null);
     const missing = !conversation.chatUrl;
     return {
       ...base,

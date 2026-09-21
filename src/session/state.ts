@@ -291,7 +291,7 @@ export function resolveConversation(session: SavedSession | null): ConversationV
       projectReady,
       chatUrl,
       connectorName: session.connectorName ?? null,
-      reuseSavedChat: false,
+      reuseSavedChat: Boolean(chatUrl),
     };
   }
 
