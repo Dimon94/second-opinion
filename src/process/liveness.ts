@@ -5,6 +5,7 @@ export type ProcessLiveness = "active" | "dead" | "unknown";
 function processStartedAt(pid: number): number | null {
   if (pid === process.pid) return Date.now() - process.uptime() * 1000;
   if (process.platform === "win32") {
+    const probeStartedAt = Date.now();
     const result = spawnSync(
       "powershell.exe",
       [
@@ -16,6 +17,15 @@ function processStartedAt(pid: number): number | null {
       { encoding: "utf8", timeout: 2000 }
     );
     const startedAt = Date.parse(result.stdout.trim());
+    if (result.status !== 0 || !Number.isFinite(startedAt)) {
+      console.error("[DEBUG-pr17-lease]", JSON.stringify({
+        elapsedMs: Date.now() - probeStartedAt,
+        status: result.status,
+        errorCode: (result.error as NodeJS.ErrnoException | undefined)?.code,
+        stdout: result.stdout,
+        stderr: result.stderr,
+      }));
+    }
     return result.status === 0 && Number.isFinite(startedAt) ? startedAt : null;
   }
   const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {

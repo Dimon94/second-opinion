@@ -1454,7 +1454,7 @@ describe("c2c doctor contract", () => {
     });
 
     const result = await runDoctor(fixture.workspace, fixture.stateDir, fixture.codexHome, "--json");
-    expect(result.status).toBe(owner.status);
+    expect(result.status, JSON.stringify(result)).toBe(owner.status);
     expect(result.stderr).toBe("");
     expect(parseResult(result.stdout)).toMatchObject({
       outcome: owner.outcome,
