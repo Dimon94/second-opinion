@@ -100,6 +100,7 @@ The packaged Skill is checked by the test suite for missing local reference targ
 ## Further reading
 
 - [Second Opinion workflow](skills/second-opinion/SKILL.md)
+- [Keeping this fork current](docs/upstream-sync.md)
 - [Security boundaries](docs/security.md)
 - [Architecture](docs/architecture.md) and [protocol](docs/protocol.md): inherited background; the async contract above extends the earlier read-only flow.
 - [Troubleshooting](docs/troubleshooting.md) and [recovery smoke](docs/recovery-smoke.md)

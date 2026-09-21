@@ -100,6 +100,8 @@ corepack pnpm test
 
 ## 文档与许可证
 
+[长期跟进上游的合并规则](docs/upstream-sync.md)
+
 [Skill](skills/second-opinion/SKILL.md) · [安全](docs/security.md) ·
 [架构](docs/architecture.md) · [协议](docs/protocol.md) · [故障排查](docs/troubleshooting.md)
 

@@ -51,8 +51,13 @@ Tunnel at the same endpoint, then reuses the Second Opinion grant and saved
 conversation. With Quick Tunnel, doctor starts a new address and sets
 `chatgptRepair.needed`; **Delete** the machine-global connector and create it
 again with the new address (never click Reconnect — the old URL is dead). Other
-workspaces reuse that connector while the bridge switches its active canonical
-root.
+workspaces reuse that connector, but each task must revalidate its own Chat-to-workspace
+binding; never fall back to the last active workspace.
+
+After connector repair, a green Doctor result alone is not acceptance. In the
+intended Chat, verify `workspace_info` and a real project-file read against the
+expected binding. If that Chat still cannot use the connector, create a new Chat,
+bind and verify it before replacing the saved conversation mapping.
 
 Fixed ChatGPT pages for first-time setup and later repair (do not hunt the UI):
 
@@ -95,7 +100,9 @@ Pairing codes are one-time and expire after ~5 minutes:
 c2c pair
 ```
 
-generates a fresh one (older codes become invalid immediately).
+generates a fresh one (older codes become invalid immediately). Generate it only
+when the authorization form is ready; do not pre-mint it while waiting for login
+or connector creation. Doctor does not need to generate a pairing code.
 
 ### Temporary address keeps dropping on a UDP-filtered network
 Leave `C2C_TUNNEL_PROTOCOL` unset to keep cloudflared's default. If the network
