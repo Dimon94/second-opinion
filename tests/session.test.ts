@@ -1,16 +1,37 @@
+import fs from "node:fs";
+import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   clearChatPointer,
   mergeSession,
+  normalizeConversationUrl,
   normalizeProjectUrl,
   projectIdFromUrl,
   readSession,
   resolveConversation,
+  sessionFile,
   writeSession,
 } from "../src/session/state.js";
 import { cleanup, makeTmpDir } from "./helpers.js";
 
 const PROJECT = "https://chatgpt.com/g/g-p-6a94399430e08191860ab5364b7748b8/project";
+
+describe("normalizeConversationUrl", () => {
+  it("canonicalizes ChatGPT conversation URLs, including the app WEB prefix", () => {
+    expect(normalizeConversationUrl("https://chatgpt.com/c/WEB:abc-123?model=auto#top")).toBe(
+      "https://chatgpt.com/c/abc-123"
+    );
+    expect(normalizeConversationUrl("https://www.chatgpt.com/c/abc-123/")).toBe(
+      "https://chatgpt.com/c/abc-123"
+    );
+  });
+
+  it("rejects non-conversation and untrusted URLs", () => {
+    expect(normalizeConversationUrl("http://chatgpt.com/c/abc-123")).toBeNull();
+    expect(normalizeConversationUrl("https://example.com/c/abc-123")).toBeNull();
+    expect(normalizeConversationUrl(PROJECT)).toBeNull();
+  });
+});
 
 describe("normalizeProjectUrl", () => {
   it("accepts the collection URL and strips extras", () => {
@@ -48,6 +69,21 @@ describe("resolveConversation", () => {
     expect(view.chatUrl).toBe("https://chatgpt.com/c/old-chat");
   });
 
+  it("normalizes a repairable saved chat and treats an invalid one as missing", () => {
+    expect(
+      resolveConversation({
+        url: "https://chatgpt.com/c/WEB:old-chat",
+        savedAt: "2026-01-01T00:00:00.000Z",
+      })
+    ).toMatchObject({ chatUrl: "https://chatgpt.com/c/old-chat", reuseSavedChat: true });
+    expect(
+      resolveConversation({
+        url: "https://example.com/c/not-chatgpt",
+        savedAt: "2026-01-01T00:00:00.000Z",
+      })
+    ).toMatchObject({ chatUrl: null, reuseSavedChat: false });
+  });
+
   it("lets an explicit long-chat opt-out win over a leftover collection URL", () => {
     const view = resolveConversation({
       conversationMode: "long-chat",
@@ -69,7 +105,7 @@ describe("resolveConversation", () => {
     });
     expect(view.mode).toBe("project");
     expect(view.projectReady).toBe(true);
-    expect(view.reuseSavedChat).toBe(false);
+    expect(view.reuseSavedChat).toBe(true);
     expect(view.connectorName).toBe("Codex with ChatGPT · Demo");
   });
 });
@@ -91,6 +127,21 @@ describe("mergeSession", () => {
     expect(next.url).toBe("https://chatgpt.com/c/new");
     expect(next.connectorName).toBe("Codex with ChatGPT · Demo");
     expect(next.taskId).toBe("c2c_ab12");
+  });
+
+  it("normalizes saved conversation URLs and rejects invalid replacements", () => {
+    expect(
+      mergeSession(null, {
+        conversationMode: "long-chat",
+        url: "https://chatgpt.com/c/WEB:new-chat?model=auto",
+      }).url
+    ).toBe("https://chatgpt.com/c/new-chat");
+    expect(() =>
+      mergeSession(null, {
+        conversationMode: "long-chat",
+        url: "https://example.com/c/not-chatgpt",
+      })
+    ).toThrow(/conversation URL/);
   });
 
   it("writes and clears a checkpoint without dropping the chat URL", () => {
@@ -141,7 +192,7 @@ describe("mergeSession", () => {
     expect(next.checkpoint?.originalGoal).toBe("dark mode");
   });
 
-  it("caps checkpoint text so it cannot become a log dump", () => {
+  it("caps checkpoint summaries and rejects multiline file, diff, or log bodies", () => {
     const next = mergeSession(
       {
         url: "https://chatgpt.com/c/keep",
@@ -157,6 +208,14 @@ describe("mergeSession", () => {
     );
     expect(next.checkpoint?.originalGoal?.length).toBeLessThanOrEqual(501);
     expect(next.checkpoint?.originalGoal?.endsWith("…")).toBe(true);
+    expect(() =>
+      mergeSession(next, {
+        checkpoint: {
+          protocolState: "PLAN_RECEIVED",
+          knownIssues: "diff --git a/src/a.ts b/src/a.ts\n-old\n+new",
+        },
+      })
+    ).toThrow(/single-line summary/);
   });
 
   it("leaves legacy sessions without a checkpoint unchanged", () => {
@@ -219,15 +278,84 @@ describe("clearChatPointer", () => {
     expect(saved?.checkpoint?.protocolState).toBe("EXECUTED_SENT");
   });
 
-  it("deletes a legacy long-chat file", () => {
+  it("clears a legacy long-chat pointer without dropping its mode or checkpoint", () => {
     const dir = makeTmpDir("session-clear-legacy");
     dirs.push(dir);
     process.env.C2C_STATE_DIR = dir;
     writeSession("def456def456", {
       url: "https://chatgpt.com/c/legacy",
+      conversationMode: "long-chat",
+      connectorName: "Codex with ChatGPT",
+      checkpoint: {
+        taskId: "c2c_ab12",
+        iteration: 4,
+        protocolState: "EXECUTED_SENT",
+        waitingFor: "GPT_REVIEW",
+        updatedAt: "2026-01-01T00:00:00.000Z",
+      },
       savedAt: "2026-01-01T00:00:00.000Z",
     });
     expect(clearChatPointer("def456def456")).toEqual({ cleared: true, keptProject: false });
-    expect(readSession("def456def456")).toBeNull();
+    expect(readSession("def456def456")).toMatchObject({
+      url: undefined,
+      conversationMode: "long-chat",
+      connectorName: "Codex with ChatGPT",
+      checkpoint: { protocolState: "EXECUTED_SENT", waitingFor: "GPT_REVIEW" },
+    });
+  });
+
+  it("isolates host tasks without inheriting legacy or fork checkpoints", () => {
+    const dir = makeTmpDir("session-task-isolation");
+    dirs.push(dir);
+    process.env.C2C_STATE_DIR = dir;
+    const legacy = writeSession("workspace", mergeSession(null, {
+      url: "https://chatgpt.com/c/legacy", taskId: "legacy-protocol",
+    }));
+    const legacyBytes = fs.readFileSync(sessionFile("workspace"), "utf8");
+    for (const owner of ["host-a", "host-b"]) {
+      writeSession("workspace", mergeSession(null, {
+        url: `https://chatgpt.com/c/${owner}`, taskId: `protocol-${owner}`,
+        projectUrl: PROJECT, conversationMode: "project",
+        checkpoint: { protocolState: "EXECUTED_LOCAL", waitingFor: "none" },
+      }), owner);
+    }
+    const first = readSession("workspace", "host-a")!;
+    const bytes = fs.readFileSync(sessionFile("workspace", "host-a"), "utf8");
+    writeSession("workspace", { ...first, savedAt: "2099-01-01T00:00:00.000Z" }, "host-a");
+    expect(fs.readFileSync(sessionFile("workspace", "host-a"), "utf8")).toBe(bytes);
+    expect(readSession("workspace", "host-b")).toMatchObject({
+      url: "https://chatgpt.com/c/host-b", checkpoint: { taskId: "protocol-host-b" },
+    });
+    expect(readSession("workspace", "fork-a")).toBeNull();
+    expect(readSession("other-workspace", "host-a")).toBeNull();
+    expect(() => readSession("workspace", " ")).toThrow(/task/i);
+    clearChatPointer("workspace", "host-a");
+    expect(readSession("workspace", "host-a")).toMatchObject({
+      url: undefined, projectUrl: PROJECT, checkpoint: { taskId: "protocol-host-a" },
+    });
+    expect(readSession("workspace", "host-b")?.url).toBe("https://chatgpt.com/c/host-b");
+    expect(readSession("workspace")).toEqual(legacy);
+    expect(fs.readFileSync(sessionFile("workspace"), "utf8")).toBe(legacyBytes);
+  });
+
+  it("keeps repeated secure writes byte-identical and owner-only", () => {
+    const dir = makeTmpDir("session-idempotent");
+    dirs.push(dir);
+    process.env.C2C_STATE_DIR = dir;
+    const first = writeSession("abc123abc123", {
+      url: "https://chatgpt.com/c/keep",
+      conversationMode: "long-chat",
+      savedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const file = sessionFile("abc123abc123");
+    const before = fs.readFileSync(file, "utf8");
+    const second = writeSession("abc123abc123", {
+      ...first,
+      savedAt: "2026-02-01T00:00:00.000Z",
+    });
+    expect(second.savedAt).toBe(first.savedAt);
+    expect(fs.readFileSync(file, "utf8")).toBe(before);
+    if (process.platform !== "win32") expect(fs.statSync(file).mode & 0o777).toBe(0o600);
+    expect(fs.readdirSync(path.dirname(file))).toEqual([path.basename(file)]);
   });
 });

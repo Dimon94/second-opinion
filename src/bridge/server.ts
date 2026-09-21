@@ -1,13 +1,17 @@
 import express, { type Request, type Response, type NextFunction } from "express";
 import type { Server } from "node:http";
 import { randomBytes } from "node:crypto";
+import path from "node:path";
 import { Workspace } from "../workspace/manager.js";
 import { AuthStore } from "../auth/store.js";
 import { createOAuthRouter } from "../auth/oauth.js";
 import { bearerAuth } from "../auth/middleware.js";
 import { PairingManager } from "../pairing/manager.js";
 import { createMcpServer } from "../mcp/server.js";
+import { createSessionMcpServer } from "../mcp/session-server.js";
 import { createMcpHttpHandler } from "../mcp/http.js";
+import { WorkspaceBindingError, WorkspaceBindingStore } from "../session/bindings.js";
+import { ReviewStore } from "../session/reviews.js";
 import { CloudflaredQuickTunnel } from "../tunnel/cloudflared.js";
 import { CloudflaredNamedTunnel } from "../tunnel/cloudflared-named.js";
 import type { TunnelProvider } from "../tunnel/provider.js";
@@ -18,7 +22,12 @@ import { SERVICE_NAME, VERSION } from "../version.js";
 import { writeRuntimeState, clearRuntimeState, type RuntimeState } from "./runtime.js";
 
 function tunnelForWorkspace(workspaceId: string, logger: Logger): TunnelProvider {
-  const binding = namedTunnelBinding(readTunnelState(workspaceId));
+  return configuredTunnelForWorkspace(workspaceId, logger) ?? new CloudflaredQuickTunnel(logger);
+}
+
+function configuredTunnelForWorkspace(workspaceId: string, logger: Logger): TunnelProvider | null {
+  const state = readTunnelState(workspaceId);
+  const binding = namedTunnelBinding(state);
   if (binding) {
     return new CloudflaredNamedTunnel({
       tunnelName: binding.tunnelName,
@@ -26,7 +35,7 @@ function tunnelForWorkspace(workspaceId: string, logger: Logger): TunnelProvider
       logger,
     });
   }
-  return new CloudflaredQuickTunnel(logger);
+  return state.preference === "quick" ? new CloudflaredQuickTunnel(logger) : null;
 }
 
 export interface BridgeOptions {
@@ -40,6 +49,9 @@ export interface BridgeOptions {
   authStoreFile?: string;
   pairingTtlMs?: number;
   accessTokenTtlMs?: number;
+  bindingStoreFile?: string;
+  bindingBootstrapTtlMs?: number;
+  reviewQueue?: ConstructorParameters<typeof ReviewStore>[1];
 }
 
 export interface Bridge {
@@ -49,6 +61,7 @@ export interface Bridge {
   adminToken: string;
   authStore: AuthStore;
   pairing: PairingManager;
+  bindings: WorkspaceBindingStore;
   tunnel: TunnelProvider;
   getPublicBaseUrl(): string | null;
   localBaseUrl(): string;
@@ -81,15 +94,20 @@ function listen(app: express.Express, host: string, preferredPort: number): Prom
 
 export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   const logger = opts.logger ?? nullLogger;
-  const workspace = new Workspace(opts.workspaceRoot);
+  let workspace = new Workspace(opts.workspaceRoot);
   const host = opts.host ?? DEFAULT_HOST;
   if (host !== "127.0.0.1" && host !== "::1" && host !== "localhost") {
     throw new Error("The bridge only binds to loopback addresses. Public exposure goes through the tunnel.");
   }
 
-  const authStore = new AuthStore(workspace.id, { file: opts.authStoreFile });
+  const bindings = new WorkspaceBindingStore({ file: opts.bindingStoreFile, bootstrapTtlMs: opts.bindingBootstrapTtlMs });
+  const reviews = new ReviewStore(undefined, opts.reviewQueue);
+  const authStore = new AuthStore({
+    file: opts.authStoreFile,
+    onRevoke: (clientId) => clientId === undefined ? bindings.clear() : bindings.revokeClient(clientId),
+  });
   const pairing = new PairingManager(workspace.id, { ttlMs: opts.pairingTtlMs });
-  const tunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger);
+  let tunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger);
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
 
   let publicBaseUrl: string | null = null;
@@ -117,7 +135,7 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     createOAuthRouter({
       store: authStore,
       pairing,
-      workspaceName: workspace.name,
+      getWorkspaceName: () => workspace.name,
       getBaseUrl,
       logger,
     })
@@ -129,9 +147,18 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   app.all(
     "/mcp",
     express.json({ limit: "8mb" }),
-    bearerAuth({ store: authStore, workspaceId: workspace.id, getBaseUrl, logger }),
+    bearerAuth({ store: authStore, getBaseUrl, logger }),
     (req: Request, res: Response) => {
       void mcpHandler(req, res);
+    }
+  );
+  const sessionMcpHandler = createMcpHttpHandler(() => createSessionMcpServer(bindings, logger, reviews), logger);
+  app.all(
+    "/mcp/session",
+    express.json({ limit: "8mb" }),
+    bearerAuth({ store: authStore, getBaseUrl, logger }),
+    (req: Request, res: Response) => {
+      void sessionMcpHandler(req, res);
     }
   );
 
@@ -151,6 +178,112 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     next();
   };
 
+  app.post("/admin/reviews", adminGuard, express.json({ limit: "8kb" }), (req: Request, res: Response) => {
+    const body = req.body;
+    if (typeof body?.workspaceRoot !== "string" || !path.isAbsolute(body.workspaceRoot) || typeof body?.taskId !== "string" || typeof body?.action !== "string") {
+      res.status(400).json({ error: "INVALID_REVIEW_REQUEST" }); return;
+    }
+    try { res.json({ review: reviews.local(body.action, body.workspaceRoot, body.taskId, body.id) }); }
+    catch (error) { res.status(400).json({ error: error instanceof WorkspaceBindingError ? error.code : "INVALID_REVIEW_STATE" }); }
+  });
+
+  app.post(
+    "/admin/bindings/authorize",
+    adminGuard,
+    express.json({ limit: "16kb" }),
+    (req: Request, res: Response) => {
+      const body = req.body;
+      if (!["bootstrapToken", "connectionProof", "workspaceRoot", "taskId"].every((key) => typeof body?.[key] === "string")) {
+        res.status(400).json({ error: "INVALID_CONNECTION_PROOF" }); return;
+      }
+      try {
+        res.json(bindings.authorize(body.bootstrapToken, body.connectionProof, body.workspaceRoot, body.taskId));
+      } catch (error) {
+        res.status(400).json({ error: error instanceof WorkspaceBindingError ? error.code : "CONNECTION_AUTHORIZATION_FAILED",
+          message: error instanceof WorkspaceBindingError ? error.message : "Check the fresh proof, local challenge, owner and target conversation." });
+      }
+    }
+  );
+
+  app.post(
+    "/admin/bindings/bootstrap",
+    adminGuard,
+    express.json({ limit: "8kb" }),
+    (req: Request, res: Response) => {
+      if (typeof req.body?.workspaceRoot !== "string" || typeof req.body?.taskId !== "string") {
+        res.status(400).json({ error: "invalid_binding_bootstrap", message: "workspaceRoot and taskId are required" });
+        return;
+      }
+      try {
+        res.json(bindings.mint(req.body.workspaceRoot, req.body.taskId));
+      } catch (error) {
+        res.status(400).json({
+          error: "invalid_binding_bootstrap",
+          message: error instanceof Error ? error.message : "Unable to authorize workspace",
+        });
+      }
+    }
+  );
+
+  app.post(
+    "/admin/bindings/unbind",
+    adminGuard,
+    express.json({ limit: "8kb" }),
+    (req: Request, res: Response) => {
+      if (typeof req.body?.taskId !== "string" || !req.body.taskId.trim() || req.body.taskId.trim().length > 200) {
+        res.status(400).json({ error: "invalid_task", message: "taskId is required" });
+        return;
+      }
+      if (typeof req.body?.workspaceRoot !== "string" || !path.isAbsolute(req.body.workspaceRoot)) {
+        res.status(400).json({ error: "invalid_workspace", message: "workspaceRoot is required" });
+        return;
+      }
+      res.json({ removed: bindings.unbindTask(req.body.taskId, req.body.workspaceRoot) });
+    }
+  );
+
+  app.post(
+    "/admin/workspace",
+    adminGuard,
+    express.json({ limit: "8kb" }),
+    async (req: Request, res: Response) => {
+      if (typeof req.body?.workspaceRoot !== "string") {
+        res.status(400).json({ error: "invalid_workspace", message: "workspaceRoot is required" });
+        return;
+      }
+      let nextWorkspace: Workspace;
+      try {
+        nextWorkspace = new Workspace(req.body.workspaceRoot);
+      } catch (error) {
+        res.status(400).json({
+          error: "invalid_workspace",
+          message: error instanceof Error ? error.message : String(error),
+        });
+        return;
+      }
+      try {
+        persistRuntime(nextWorkspace);
+        workspace = nextWorkspace;
+        logger.info(`Activated workspace ${workspace.name} (${workspace.id})`);
+        res.json({
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+          workspaceRoot: workspace.root,
+        });
+      } catch (error) {
+        try {
+          persistRuntime(workspace);
+        } catch {
+          // Preserve the original activation error.
+        }
+        res.status(500).json({
+          error: "workspace_activation_failed",
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+  );
+
   app.post("/admin/pairing", adminGuard, (_req, res) => {
     const session = pairing.create();
     logger.info("Created pairing session");
@@ -168,6 +301,11 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
       publicUrl: publicBaseUrl,
       tunnel: tunnel.status(),
       tokenCount: authStore.tokenCount(),
+      capabilities: { authReload: true },
+      bindingCount: bindings.count(),
+      authorization: authStore.authorizationStatus(
+        publicBaseUrl ?? `http://${host}:${port}`
+      ),
       pairingActive: pairing.hasActiveSession(),
       pid: process.pid,
       startedAt,
@@ -175,8 +313,8 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   });
 
   app.post("/admin/tunnel/start", adminGuard, (_req, res) => {
-    tunnel
-      .start(port)
+    const start = tunnel.status().running ? tunnel.restart(port) : tunnel.start(port);
+    start
       .then((url) => {
         publicBaseUrl = url;
         persistRuntime();
@@ -186,6 +324,13 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
         logger.error(`Tunnel start failed: ${error.message}`);
         res.status(500).json({ error: "tunnel_failed", message: error.message });
       });
+  });
+
+  app.get("/admin/tunnel/doctor", adminGuard, (_req, res) => {
+    void tunnel.doctor().then(
+      (report) => res.json(report),
+      (error: Error) => res.status(500).json({ error: "tunnel_probe_failed", message: error.message })
+    );
   });
 
   app.post("/admin/tunnel/stop", adminGuard, (_req, res) => {
@@ -203,6 +348,11 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
     res.json({ revoked: count });
   });
 
+  app.post("/admin/auth/reload", adminGuard, (_req, res) => {
+    authStore.reload();
+    res.json({ reloaded: true });
+  });
+
   app.post("/admin/shutdown", adminGuard, (_req, res) => {
     res.json({ shuttingDown: true });
     setTimeout(() => {
@@ -214,13 +364,13 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   const startedAt = new Date().toISOString();
   logger.info(`Bridge listening on ${host}:${port} for workspace ${workspace.name} (${workspace.id})`);
 
-  const persistRuntime = (): void => {
+  const persistRuntime = (activeWorkspace = workspace): void => {
     if (opts.persistRuntime === false) return;
     const state: RuntimeState = {
       service: SERVICE_NAME,
       version: VERSION,
-      workspaceId: workspace.id,
-      workspaceRoot: workspace.root,
+      workspaceId: activeWorkspace.id,
+      workspaceRoot: activeWorkspace.root,
       pid: process.pid,
       port,
       adminToken,
@@ -242,13 +392,18 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
   };
 
   return {
-    workspace,
+    get workspace() {
+      return workspace;
+    },
     port,
     host,
     adminToken,
     authStore,
+    bindings,
     pairing,
-    tunnel,
+    get tunnel() {
+      return tunnel;
+    },
     getPublicBaseUrl: () => publicBaseUrl,
     localBaseUrl: () => `http://${host}:${port}`,
     close: shutdown,

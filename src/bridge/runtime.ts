@@ -1,11 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
-import { ensureDir, getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
+import { getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
+import { observeProcess } from "../process/liveness.js";
 import { SERVICE_NAME, VERSION } from "../version.js";
 
 /**
- * Runtime state file: how the CLI/Skill finds a running bridge for a
- * workspace. Contains the admin token, so it is 0600 and lives in the user
+ * Runtime state file: how the CLI/Skill finds the one machine-global bridge.
+ * The workspace fields identify its current canonical root. Contains the
+ * admin token, so it is 0600 and lives in the user
  * state dir, never in the project.
  */
 export interface RuntimeState {
@@ -20,21 +22,21 @@ export interface RuntimeState {
   startedAt: string;
 }
 
-export function runtimeFile(workspaceId: string): string {
-  return path.join(ensureDir(path.join(getStateDir(), "runtime")), `${workspaceId}.json`);
+export function runtimeFile(_workspaceId?: string): string {
+  return path.join(getStateDir(), "runtime", "global.json");
 }
 
 export function writeRuntimeState(state: RuntimeState): void {
   writeSecureJson(runtimeFile(state.workspaceId), state);
 }
 
-export function readRuntimeState(workspaceId: string): RuntimeState | null {
-  return readJsonIfExists<RuntimeState>(runtimeFile(workspaceId));
+export function readRuntimeState(_workspaceId?: string): RuntimeState | null {
+  return readJsonIfExists<RuntimeState>(runtimeFile());
 }
 
-export function clearRuntimeState(workspaceId: string): void {
+export function clearRuntimeState(_workspaceId?: string): void {
   try {
-    fs.rmSync(runtimeFile(workspaceId), { force: true });
+    fs.rmSync(runtimeFile(), { force: true });
   } catch {
     // ignore
   }
@@ -47,7 +49,7 @@ export interface HealthPayload {
   status: string;
 }
 
-/** Probe a port and check whether a healthy c2c bridge for the workspace answers. */
+/** Probe a port and check whether a healthy c2c bridge answers. */
 export async function probeBridge(
   port: number,
   timeoutMs = 2000
@@ -71,34 +73,24 @@ export type BridgeObservation =
   | { state: "stopped"; runtime: RuntimeState | null; reason: "runtime_missing" | "pid_missing" }
   | { state: "unknown"; runtime: RuntimeState | null; reason: "probe_failed" | "pid_unknown" | "workspace_mismatch" };
 
-function observePid(pid: number): "present" | "missing" | "unknown" {
-  if (!Number.isInteger(pid) || pid <= 0) return "unknown";
-  try {
-    process.kill(pid, 0);
-    return "present";
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ESRCH" ? "missing" : "unknown";
-  }
-}
-
 /**
  * Distinguish a dead bridge from a probe that simply failed.
  * Read-only: never starts, stops, or clears runtime.
  */
-export async function findBridgeObservation(workspaceId: string): Promise<BridgeObservation> {
-  const runtime = readRuntimeState(workspaceId);
+export async function findBridgeObservation(_workspaceId?: string): Promise<BridgeObservation> {
+  const runtime = readRuntimeState();
   if (!runtime) return { state: "stopped", runtime: null, reason: "runtime_missing" };
 
   const health = await probeBridge(runtime.port);
-  if (health && health.workspaceId === workspaceId) {
+  if (health && health.workspaceId === runtime.workspaceId) {
     return { state: "healthy", runtime };
   }
   if (health) {
     return { state: "unknown", runtime, reason: "workspace_mismatch" };
   }
 
-  const pid = observePid(runtime.pid);
-  if (pid === "missing") return { state: "stopped", runtime, reason: "pid_missing" };
+  const pid = observeProcess(runtime.pid);
+  if (pid === "dead") return { state: "stopped", runtime, reason: "pid_missing" };
   return { state: "unknown", runtime, reason: pid === "unknown" ? "pid_unknown" : "probe_failed" };
 }
 

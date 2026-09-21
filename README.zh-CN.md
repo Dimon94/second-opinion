@@ -1,174 +1,109 @@
-# Codex with ChatGPT
+# Second Opinion
 
-[English](README.md) | **简体中文**
+[English](README.md) | 简体中文
 
-> ChatGPT 负责思考，Codex 负责干活。
+让 ChatGPT Chat 基于真实项目材料给出第二意见；Codex 负责核验、采纳或拒绝建议，以及用户授权范围内的执行。
 
-## 解决什么问题
+## 来源与声明
 
-ChatGPT 付费订阅的网页版额度大量闲置，Codex 却在消耗紧张的 API 额度做
-规划和 Review。本项目把"思考"交给你已付费的网页版 ChatGPT，Codex 只负责
-执行。不用 API Key、不搞逆向代理——官方网页 + 只读 MCP 桥接。
+本项目由 [XiaoDuoYa/codex-with-chatgpt](https://github.com/XiaoDuoYa/codex-with-chatgpt)
+fork 而来，由 Dimon94 独立维护，已进行较大幅度修改。
+感谢原作者及贡献者提供的 Bridge、OAuth、隧道与 Agent 工作流基础。
+本分支重点增加多工作区/多任务隔离、本地授权握手、异常恢复与异步评议通知。
 
-## 这是什么
+这不是上游官方发行版，也不是 OpenAI 官方项目，不代表上游或 OpenAI 的背书。
+保留原版权声明和 [MIT 许可证](LICENSE)，详见 [NOTICE](NOTICE)。
+本分支的问题请提交到[本仓库](https://github.com/Dimon94/second-opinion/issues)。
 
-把 ChatGPT 网页版变成 Codex 编码会话的"规划与审查大脑"，而执行权完全保留在
-Codex 手里。你的仓库永远不会被上传——ChatGPT 通过一条安全的、OAuth 保护的
-**只读** MCP 连接，按需读取当前工作区里它真正需要的那几行代码。
+## 三个名称，不混用
 
-## 一段话安装（纯小白专用）
+- **Second Opinion**：项目名称与 [Codex Skill](skills/second-opinion/SKILL.md)。
+- **Codex Workspace Connector**：ChatGPT 里的 MCP 连接器；老安装可能仍显示旧名 Second Opinion。
+- **c2c / codex-with-chatgpt**：保留的命令、包名和状态目录标识。远程仓库改名不意味着迁移已有授权或运行目录。
 
-不懂 git、Node、终端？完全不需要懂。把下面这段话原样复制给你的编码
-Agent（Codex），然后去倒杯咖啡：
+Skill 只走 **Chat，不走 Work**，并核对实际可见的 Pro 模型。
+Codex 并非“只执行”：它还要核验材料与会话归属、读回完整意见、判断建议及守住用户授权边界。
 
-```text
-请帮我完整安装并配置 Codex with ChatGPT，全程自动，我是不懂技术的小白，
-所有事情你自己做：
+## 怎么协同
 
-1. 环境自检：需要 git 和 Node.js ≥ 20，缺什么就自动安装
-  （macOS 用 Homebrew，Windows 用 winget），同时安装 cloudflared。
-2. 下载：把 https://github.com/XiaoDuoYa/codex-with-chatgpt 克隆到
-   ~/codex-with-chatgpt（已存在就 git pull 更新）。
-3. 构建：在该目录里执行 corepack pnpm install 和 corepack pnpm build。
-4. 安装 Skill：把仓库里的 skill/SKILL.md 复制到
-   ~/.codex/skills/codex-with-chatgpt/SKILL.md，并把文件中
-   "The codex-with-chatgpt checkout lives at:" 那一行的路径改成实际克隆路径。
-5. 首次配置：按 SKILL.md 里的 first-time setup 流程执行
-  （运行 c2c setup，用内置浏览器打开 ChatGPT 配置连接器并输入配对码）。
-   全程只用内置浏览器，禁止打开任何第三方浏览器。
-6. 只有遇到需要我登录（ChatGPT / Cloudflare）、验证码或两步验证时才叫我，
-   而且一次只告诉我一个动作。
-7. 完成后给我看 ✓ 清单，并确认文件读取测试通过。我不懂 MCP、OAuth、
-   Tunnel、端口这些词，不要向我解释；出了问题先自己修。
+1. Codex 核对项目、宿主任务和 Chat 的对应关系，登记本轮、发问，然后结束回合。
+2. ChatGPT 读取授权材料，分析完后提交评议。
+3. Bridge 保存结果，通知本地预先登记的原 Codex 任务。
+4. Codex 被激活后核验轮次，主动打开原 Chat，读回完整意见、分析并确认。
+5. 需要追问就登记下一轮；结束后清理本任务绑定。
+
+项目文件读取是只读的；**完成通知不是只读操作**：它保存意见并启动 Codex 新回合，
+需要在读取权限之外明确授予 `review.submit`。
+“通知成功”“完整读回”“授权任务完成”分别验收，不能互相替代。
+被读取的文件内容会传给 ChatGPT，因此不再使用“仓库数据永不上传”这类绝对承诺。
+
+## 安装与使用
+
+需要 Node.js 20+、Corepack/pnpm、Git、运行中的本机 Codex App 及浏览器工具、
+具备所需模型和连接器能力的 ChatGPT 账号；公网连接需要 cloudflared。
+自动唤醒还要求本机 Codex CLI 支持 `queue --thread --message`，不能假设所有版本都支持。
+本流程不使用 OpenAI API Key。
+
+```sh
+git clone https://github.com/Dimon94/second-opinion.git
+cd second-opinion
+corepack pnpm install --frozen-lockfile
+corepack pnpm build
+node bin/c2c.js --help
 ```
 
-**更新**：Skill 每天自动检查一次 GitHub，有新版本会自动更新并继续任务，
-无需任何操作；也可以随时对 Codex 说"更新 Codex with ChatGPT"。
+安装完整的 `skills/second-opinion/` 目录，不能只复制 SKILL.md。
+推荐从 Codex skills 目录建立指向此仓库 Skill 绝对路径的符号链接，便于更新和定位运行入口。
+已有同名 Skill 时先比较，保留本机部署信息，不能盲目覆盖。
+复制安装需要按[运行入口](skills/second-opinion/references/local-runtime.md)记录实际部署仓库位置。
 
-## 安装 → 配置 → 使用（手动版）
+首次连接先看 `node <checkout>/bin/c2c.js setup --help`，再按现有
+[配置 Skill](skill/SKILL.md)及 [Doctor 契约](skill/DOCTOR-HANDOFF.md)执行。
+使用本 fork 的 checkout，不自动从上游拉取并覆盖。
+连接器显示名设为 **Codex Workspace Connector**，端点使用 Doctor 返回的 `/mcp/session`。
+登录、OAuth 授权和平台确认由用户完成；已有部署先检查再变更。
+固定域名隧道可减少重启后的 URL 变化。
 
-1. 安装 Codex Skill：把 `skill/` 复制到 `~/.codex/skills/codex-with-chatgpt/`。
-2. 对 Codex 说：**"使用 Codex with ChatGPT 完成首次配置。"**
-3. 之后正常使用：**"使用 Codex with ChatGPT，帮我实现 XXX。"**
+在实际项目的 Codex 任务里说：
 
-说明书到此结束。你不需要知道 MCP、OAuth、Tunnel、端口、localhost 是什么——
-Codex 会自动完成所有配置，你只会看到：
+> 使用 $second-opinion，围绕当前项目的设计讨论两轮，读回意见并说明采纳或拒绝的理由；先不要改代码。
 
-```
-Codex with ChatGPT
+每个宿主任务，包括分叉和同项目的兄弟任务，都使用自己的 Chat。
+恢复时重新核验对应关系与真实文件读取，不回退到机器上最后活跃的工作区。
 
-✓ 当前项目已识别
-✓ Workspace Bridge 已启动
-✓ 安全连接已建立
-✓ ChatGPT 已连接
-✓ 文件读取测试通过
+## 授权与恢复
 
-Ready.
-```
+部署工具变更后，刷新同一连接器元数据，在新 Chat 验证。
+设置页普通 **Reconnect 可能只申请旧的只读权限**；完成通知需要走工具级 OAuth 入口，
+确认实际请求包含 `review.submit`。
 
-唯一可能需要你动手的步骤：登录 ChatGPT（如果要用固定域名，再登录一次 Cloudflare）。**新仓库**还会请你在 ChatGPT 里建一次项目（合集）：名字用仓库名，记忆选「仅限项目记忆」。侧栏如果没有「项目」，把鼠标放在「聊天」上，点右边三个点，选「按项目整理」。之后对话都从合集页开，不用回首页。已经在用的仓库默认还是原来的一条长对话，除非你说要改成 Project。
+权限扩大后重新取得连接证明并建立绑定。平台可能自动续调旧请求并返回
+`WORKSPACE_BINDING_MISMATCH`，这不是通知成功；先检查旧轮状态再恢复。
+遇到安全拦截不改标只读、不换入口绕过。完整规则见[异步评议](skills/second-opinion/references/async-review.md)。
 
-### 可选的固定域名
+## 验收范围
 
-默认公网地址是临时的，桥重启后会变。Codex 会删掉这个项目的 ChatGPT 插件再按新地址加回去。
+2026-09-20，真实本机 Codex 任务与 ChatGPT Chat / 可见 6 Pro 已连续完成两轮：
+发问 → 结束回合 → 真实通知 → 自动新回合 → 主动完整读回 → 确认，最终清理绑定。
 
-如果你有 Cloudflare 账号，并且域名已经加在 Cloudflare 上，首次配置时（老用户则在下一次编码时问一次）会问你要不要用固定域名，例如 `c2c-<项目>.你的域名`。选是的话，浏览器里授权一次 Cloudflare 即可。之后重启一般不用再改插件。没有账号、不想用、登录失败：继续用临时地址，功能一样，只是修复更慢。
+这证明单任务的两轮异步链路，不代表四任务并发、休眠恢复、App 退出、远程宿主或
+逐次确认弹窗全部通过。详见[验收记录](docs/validation.md)。
 
-凭证放在系统目录，不进项目。
-
-## 工作原理
-
-```
-             ┌───────────────────────────┐
-             │      ChatGPT 网页版       │
-             │   推理 / 规划 / 审查      │
-             └──────────┬──────────▲─────┘
-                        │          │
-               MCP      │          │ Computer Use
-              数据面    │          │ 控制面（消息 < 1 KB）
-                        ▼          │
-             ┌─────────────────────┐
-             │      C2C Bridge     │   仅监听本机回环地址
-             │  只读 MCP           │   OAuth 2.1 + 一次性配对码
-             │  OAuth + 配对       │   Cloudflare Quick Tunnel
-             │  Tunnel 管理        │
-             └──────────┬──────────┘
-                        │  只读
-                        ▼
-             ┌─────────────────────┐          ┌─────────────────────┐
-             │     本地工作区      │◀─────────│    Codex Harness    │
-             └─────────────────────┘ 编辑/git │  Shell / 测试 / 修复 │
-                                              └─────────────────────┘
+```sh
+corepack pnpm typecheck
+corepack pnpm build
+corepack pnpm test
 ```
 
-- **控制面（Computer Use）**：Codex 与 ChatGPT 之间只交换极小的结构化 `[C2C]`
-  状态消息——`INIT → PLAN → EXECUTED → REVIEW → DONE`。绝不粘贴 diff、日志
-  或文件内容。
-- **数据面（MCP）**：ChatGPT 缺什么自己拉什么，共 9 个只读工具：
-  `workspace_info`、`list_directory`、`read_file`、`search_workspace`、
-  `git_status`、`git_diff`、`test_status`、`execution_summary`、
-  `execution_output`。
-- **独立审查**：Codex 执行完毕后，ChatGPT 通过 MCP 亲自检查真实的 git diff
-  和测试记录——绝不因为 Codex 说"测试全过"就直接相信。
+已有 CI 在 macOS/Windows 执行上述检查；测试也校验打包 Skill 的本地引用和机器专属路径。
+自动化测试不替代真实网页验收。
 
-## 安全模型（简版）
+## 文档与许可证
 
-- **从构造上只读**：服务端根本不存在写文件/删除/Shell/提交类工具，任何提示
-  注入都无法启用它们。
-- **一个工作区 = 一道边界**：每个令牌绑定单一工作区；路径校验基于规范化
-  realpath（symlink、`../`、绝对路径逃逸全部被拦截并有测试覆盖）。
-- **敏感文件永不外泄**：`.env*`、密钥、SSH、各类凭据默认拒绝
-  （`.env.example` 放行）；`.c2cignore` 可追加自定义规则。
-- **知道 URL 不等于有权限**：公网 MCP 端点强制 OAuth 2.1（PKCE S256、动态
-  客户端注册、refresh token 轮换）。无令牌：401；令牌属于别的工作区：403。
-- **模型永远接触不到长期凭据**：唯一会出现在浏览器里的秘密是一次性配对码
-  （5 分钟有效、限 5 次尝试、限速、用后即毁）。
+[长期跟进上游的合并规则](docs/upstream-sync.md)
 
-完整威胁模型：[docs/security.md](docs/security.md)
+[Skill](skills/second-opinion/SKILL.md) · [安全](docs/security.md) ·
+[架构](docs/architecture.md) · [协议](docs/protocol.md) · [故障排查](docs/troubleshooting.md)
 
-## 开发者
-
-```bash
-pnpm install
-pnpm build          # 产出 dist/，暴露 c2c 命令
-pnpm test           # vitest：146 个测试（路径安全、OAuth、配对、MCP 端到端）
-
-c2c setup           # 一条命令：Bridge + 隧道 + 配对码
-c2c sandbox-allow   # 把本地设置目录加入 Codex 沙箱白名单（macOS / Windows）
-c2c status / doctor / pair / unpair / logs / stop
-```
-
-环境要求：Node.js >= 20、git；公网连接需要 `cloudflared`
-（自动检测，Skill 会替你安装）。
-
-文档：[架构](docs/architecture.md) · [协议](docs/protocol.md) ·
-[安全](docs/security.md) · [故障排查](docs/troubleshooting.md)
-
-## 目录结构
-
-```
-src/
-  bridge/     本机回环 HTTP 服务、端口自动恢复、管理 API
-  mcp/        9 个只读工具、无状态 Streamable HTTP
-  auth/       OAuth 2.1（PKCE、动态注册、refresh 轮换、吊销）
-  pairing/    一次性配对码（CSPRNG、TTL、限速）
-  workspace/  路径收敛、敏感文件策略、搜索、git
-  tunnel/     TunnelProvider 抽象 + Cloudflare Quick Tunnel
-  execution/  审查闭环所需的执行记录
-  process/    守护进程生命周期
-  cli/        c2c 命令行
-skill/        Codex Skill（真正的 UX 层）
-tests/        单元 + 集成测试
-docs/         架构 / 协议 / 安全 / 故障排查
-```
-
-## 状态与声明
-
-V1。已端到端验证：Bridge、OAuth + 配对、公网隧道、ChatGPT 连接器配置、
-零操作首次配置体验。
-
-**非官方社区项目，与 OpenAI 无关联，未获其背书。**
-
-## 许可证
-
-[MIT](LICENSE)
+架构与协议文档包含继承的旧只读流程；异步通知以当前 Skill 与安全文档为准。
+继续采用 [MIT](LICENSE)，保留上游版权和许可文本；独立维护与主要差异见 [NOTICE](NOTICE)。

@@ -1,13 +1,13 @@
-import { Command } from "commander";
+import { Command, InvalidArgumentError } from "commander";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { startBridge } from "../bridge/server.js";
 import { findBridgeObservation, findLiveBridge, type RuntimeState } from "../bridge/runtime.js";
-import { adminFetch, ensureBridge, stopBridge } from "../process/daemon.js";
-import { Workspace } from "../workspace/manager.js";
-import { AuthStore } from "../auth/store.js";
+import { adminFetch, bridgeSupportsRecovery, ensureBridge, stopBridge } from "../process/daemon.js";
+import { Workspace, workspacePathReference } from "../workspace/manager.js";
+import { AuthStore, type AuthorizationStatus } from "../auth/store.js";
 import { detectTunnelBinaries } from "../tunnel/detect.js";
 import {
   chooseQuickTunnel,
@@ -26,14 +26,22 @@ import {
 } from "../tunnel/state.js";
 import { Logger } from "../logger/index.js";
 import { getStateDir } from "../config/paths.js";
+import {
+  acknowledgeLegacyRuntimeReload,
+  hasLegacyStateToMigrate,
+  migrateLegacyState,
+  type LegacyMigrationResult,
+} from "../config/legacy-migration.js";
 import { ensureSandboxAllowlist, getCodexConfigPath, isStateDirAllowlisted } from "../config/sandbox-allow.js";
 import { mergeUiPrefs, readUiPrefs, SETUP_MODES, type SetupMode } from "../config/ui-prefs.js";
 import {
   CHATGPT_CREATE_CONNECTOR_URL,
   CHATGPT_DEVELOPER_MODE_URL,
   CHATGPT_PLUGINS_URL,
+  DEFAULT_CONNECTOR_NAME,
   connectorAction,
   connectorNameFor,
+  endpointFingerprint,
   mcpUrlFromPublic,
   normalizePublicUrl,
   readLastEndpoint,
@@ -41,12 +49,15 @@ import {
   writeLastEndpoint,
   type LastEndpoint,
 } from "../config/endpoint.js";
-import { PRODUCT_NAME, VERSION } from "../version.js";
+import { PRODUCT_NAME, SERVICE_NAME, VERSION } from "../version.js";
+import type { TunnelDoctorReport } from "../tunnel/provider.js";
 import {
+  claimLegacySession,
   clearChatPointer,
   mergeSession,
   readSession,
   resolveConversation,
+  startNewTaskSession,
   writeSession,
   PROTOCOL_STATES,
   WAITING_FOR,
@@ -56,6 +67,27 @@ import {
 } from "../session/state.js";
 import { appendExecutionRecord } from "../execution/records.js";
 import { saveExecutionOutput } from "../execution/output.js";
+import { sanitizeDiagnosticText, sanitizeDiagnosticValue } from "../execution/sanitize.js";
+import { WorkspaceBindingStore } from "../session/bindings.js";
+import {
+  createDoctorResult,
+  createRecoveryLeaseDoctorResult,
+  applyDoctorBrowserGate,
+  observedConnectorReplacement,
+  authorizationDisposition,
+  DOCTOR_EXIT_STATUS,
+  renderDoctorResult,
+  type DoctorChatgptRepair,
+  type DoctorCheck,
+  type DoctorAuthorizationResult,
+  type DoctorNamedRepair,
+  type DoctorTunnelResult,
+  type DoctorBrowserGate,
+  type DoctorBridgeObservation,
+  type DoctorRequestedWorkspaceIdentity,
+  type DoctorWorkspaceIdentity,
+} from "../doctor/result.js";
+import { acquireRecoveryLease, type RecoveryLeaseHandle } from "../doctor/lease.js";
 
 const program = new Command();
 
@@ -69,8 +101,87 @@ function resolveWorkspace(option?: string): string {
   return path.resolve(option ?? process.cwd());
 }
 
+function doctorWorkspaceIdentity(workspace: Workspace): DoctorWorkspaceIdentity {
+  return { id: workspace.id, name: workspace.name };
+}
+
+function doctorRequestedWorkspaceIdentity(
+  root: string,
+  workspace: Workspace | null
+): DoctorRequestedWorkspaceIdentity {
+  return workspace
+    ? { ...doctorWorkspaceIdentity(workspace), reference: workspace.id }
+    : { id: null, name: null, reference: workspacePathReference(root) };
+}
+
+function doctorRuntimeWorkspaceIdentity(runtime: RuntimeState): DoctorWorkspaceIdentity {
+  try {
+    return doctorWorkspaceIdentity(new Workspace(runtime.workspaceRoot));
+  } catch {
+    return { id: runtime.workspaceId, name: null };
+  }
+}
+
+function parseInteger(value: string): number {
+  const normalized = value.trim();
+  if (!/^-?\d+$/.test(normalized)) {
+    throw new InvalidArgumentError("must be an integer");
+  }
+  const parsed = Number(normalized);
+  if (!Number.isSafeInteger(parsed)) throw new InvalidArgumentError("must be a safe integer");
+  return parsed;
+}
+
+function parseNonNegativeInteger(value: string): number {
+  const parsed = parseInteger(value);
+  if (parsed < 0) throw new InvalidArgumentError("must be a non-negative integer");
+  return parsed;
+}
+
+function parseChangedFiles(value: string): string[] | number {
+  const normalized = value.trim();
+  if (/^-?\d+$/.test(normalized)) {
+    const count = parseInteger(normalized);
+    if (count < 0) {
+      throw new InvalidArgumentError("changed-files count must be a non-negative safe integer");
+    }
+    return count;
+  }
+  return value.split(",").map((file) => file.trim()).filter(Boolean);
+}
+
 /** Local harness output only. Never pasted into ChatGPT. */
 const MAX_RECORD_OUTPUT_READ = 256 * 1024;
+
+type PublicHealth = "passed" | "failed" | "unknown" | "not_checked";
+
+async function probePublicHealth(publicUrl: string | null, workspaceId: string): Promise<PublicHealth> {
+  if (!publicUrl) return "not_checked";
+  try {
+    const response = await fetch(`${normalizePublicUrl(publicUrl)}/health`, {
+      signal: AbortSignal.timeout(8000),
+    });
+    const body = (await response.json().catch(() => null)) as {
+      service?: unknown;
+      workspaceId?: unknown;
+      status?: unknown;
+    } | null;
+    return response.ok &&
+      body?.service === SERVICE_NAME &&
+      body.workspaceId === workspaceId &&
+      body.status === "ok"
+      ? "passed"
+      : "failed";
+  } catch {
+    return "unknown";
+  }
+}
+
+function requiresCloudflareLogin(message: string): boolean {
+  return /origin certificate|cert\.pem|credentials? file|unauthorized|authentication|tunnel login/i.test(
+    message
+  );
+}
 
 function readCappedUtf8(filePath: string, maxBytes: number): string {
   const fd = fs.openSync(filePath, "r");
@@ -97,6 +208,7 @@ function persistWorkspaceEndpoint(opts: {
     workspaceId: opts.workspaceId,
     previousName: previous?.connectorName,
     hadEndpointBefore: Boolean(previous),
+    replacingEndpoint: connectorAction(previous?.mcpUrl, opts.mcpUrl) === "update",
   });
   writeLastEndpoint({
     workspaceId: opts.workspaceId,
@@ -124,6 +236,18 @@ function tunnelChoicePayload(workspace: Workspace, zoneHint?: string): Record<st
     loginPrompt: NAMED_LOGIN_PROMPT,
     fallbackReason: state.fallbackReason,
   };
+}
+
+function emitCloudflareLoginAction(page: string, json: boolean): void {
+  if (json) {
+    say(JSON.stringify({
+      outcome: "user_action_required",
+      reason: "cloudflare_login_required",
+      nextAction: { type: "cloudflare_login", reason: "cloudflare_login_required", page },
+    }));
+  } else {
+    say(`请在 Codex 内置浏览器打开：${page}`);
+  }
 }
 
 function trySandboxAllow():
@@ -156,6 +280,7 @@ interface AdminInfo {
   publicUrl: string | null;
   tunnel: { running: boolean; url: string | null; provider: string };
   tokenCount: number;
+  authorization: AuthorizationStatus;
   pairingActive: boolean;
   pid: number;
   startedAt: string;
@@ -167,7 +292,7 @@ async function ensureBridgeAndTunnel(
 ): Promise<{ runtime: RuntimeState; info: AdminInfo; mcpUrl: string | null }> {
   const { runtime } = await ensureBridge(workspaceRoot);
   let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-  let mcpUrl: string | null = info.publicUrl ? `${info.publicUrl}/mcp` : null;
+  let mcpUrl = mcpUrlFromPublic(info.publicUrl);
   if (opts.tunnel && !info.publicUrl) {
     const binaries = detectTunnelBinaries();
     if (!binaries.cloudflared) {
@@ -178,7 +303,7 @@ async function ensureBridgeAndTunnel(
     const result = await adminFetch<TunnelStartResponse>(runtime, "POST", "/admin/tunnel/start", 90_000);
     if (!result.url) throw new Error(result.message ?? "Tunnel start failed");
     info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-    mcpUrl = `${result.url}/mcp`;
+    mcpUrl = mcpUrlFromPublic(result.url);
   }
   return { runtime, info, mcpUrl };
 }
@@ -188,6 +313,102 @@ program
   .description(`${PRODUCT_NAME} — ChatGPT thinks. Codex works.`)
   .version(VERSION, "-v, --version")
   .configureHelp({ sortSubcommands: true });
+
+function acceptUnusedWorkspaceOption(command: Command): Command {
+  return command.option("-w, --workspace <path>", "ignored; this command is machine-wide");
+}
+
+function hostTaskId(): string {
+  const taskId = process.env.CODEX_THREAD_ID?.trim();
+  if (!taskId || taskId.length > 200) {
+    throw new Error("CODEX_THREAD_ID is required for a task-scoped workspace binding.");
+  }
+  return taskId;
+}
+
+const bindingCmd = program.command("binding").description("Authorize a task-scoped workspace binding");
+
+const reviewCmd = program.command("review").description("Manage task-scoped asynchronous Second Opinion rounds");
+for (const action of ["arm", "status", "ack", "cancel"]) {
+  reviewCmd.command(action).option("--id <id>", "exact review ID for ack/cancel").option("--json", "machine-readable output", false)
+    .action(async (opts: { id?: string; json: boolean }) => {
+      try {
+        const taskId = hostTaskId();
+        const observation = await findBridgeObservation();
+        if (observation.state !== "healthy") throw new Error("A healthy Bridge is required.");
+        const result = await adminFetch(observation.runtime, "POST", "/admin/reviews", 20000,
+          { action, id: opts.id, taskId, workspaceRoot: process.cwd() });
+        say(JSON.stringify(result));
+      } catch (error) { handleCliError(error, opts.json); }
+    });
+}
+
+bindingCmd.command("authorize")
+  .description("Authorize locally from JSON stdin: bootstrapToken and connectionProof")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { json: boolean }) => {
+    try {
+      const taskId = hostTaskId();
+      if (process.stdin.isTTY) throw new Error("Pass authorization material through JSON stdin, never command arguments.");
+      let input = "";
+      for await (const chunk of process.stdin) {
+        input += chunk.toString();
+        if (input.length > 16384) throw new Error("Authorization input too large.");
+      }
+      let body: { bootstrapToken: string; connectionProof: string };
+      try { body = JSON.parse(input); } catch { throw new Error("Invalid authorization JSON."); }
+      const observation = await findBridgeObservation();
+      if (observation.state !== "healthy") throw new Error("A healthy Bridge is required before authorization.");
+      const result = await adminFetch<{ binding_token: string }>(observation.runtime, "POST", "/admin/bindings/authorize", 60_000,
+        { bootstrapToken: body.bootstrapToken, connectionProof: body.connectionProof, workspaceRoot: process.cwd(), taskId });
+      if (opts.json) say(JSON.stringify({ ok: true, ...result }));
+      else say(result.binding_token);
+    } catch (error) { handleCliError(error, opts.json); }
+  });
+
+bindingCmd
+  .command("bootstrap")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { json: boolean }) => {
+    try {
+      const taskId = hostTaskId();
+      const observation = await findBridgeObservation();
+      if (observation.state !== "healthy") throw new Error("A healthy Bridge is required before workspace binding.");
+      const result = await adminFetch<{ bootstrapToken: string; expiresAt: number }>(
+        observation.runtime,
+        "POST",
+        "/admin/bindings/bootstrap",
+        60_000,
+        { workspaceRoot: process.cwd(), taskId }
+      );
+      if (opts.json) say(JSON.stringify({ ok: true, ...result }));
+      else say(result.bootstrapToken);
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+bindingCmd
+  .command("unbind")
+  .option("--json", "machine-readable output", false)
+  .action(async (opts: { json: boolean }) => {
+    try {
+      const taskId = hostTaskId();
+      const observation = await findBridgeObservation();
+      if (observation.state !== "healthy") throw new Error("A healthy Bridge is required before unbinding.");
+      const result = await adminFetch<{ removed: number }>(
+        observation.runtime,
+        "POST",
+        "/admin/bindings/unbind",
+        60_000,
+        { taskId, workspaceRoot: process.cwd() }
+      );
+      if (opts.json) say(JSON.stringify({ ok: true, ...result }));
+      else check(`已解绑 ${result.removed} 个会话工作区`);
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
 
 // ---------------------------------------------------------------- serve (internal)
 
@@ -239,76 +460,6 @@ program
       check(`当前项目已识别（${info.workspaceName}）`);
       check("Workspace Bridge 已启动");
       if (mcpUrl) check("安全连接已建立");
-    } catch (error) {
-      handleCliError(error, opts.json);
-    }
-  });
-
-// ---------------------------------------------------------------- setup
-
-program
-  .command("setup")
-  .description("First-time setup: bridge + secure connection + pairing code")
-  .option("-w, --workspace <path>")
-  .option("--no-tunnel", "local-only setup (development)")
-  .option("--json", "machine-readable output", false)
-  .action(async (opts: { workspace?: string; tunnel: boolean; json: boolean }) => {
-    const root = resolveWorkspace(opts.workspace);
-    try {
-      if (!opts.json) {
-        say(PRODUCT_NAME);
-        say("");
-        say("正在连接 ChatGPT…");
-        say("");
-      }
-      const sandbox = trySandboxAllow();
-      const { runtime, info, mcpUrl } = await ensureBridgeAndTunnel(root, { tunnel: opts.tunnel });
-      const connectorName = mcpUrl
-        ? persistWorkspaceEndpoint({
-            workspaceId: info.workspaceId,
-            workspaceName: info.workspaceName,
-            port: runtime.port,
-            publicUrl: info.publicUrl,
-            mcpUrl,
-          })
-        : connectorNameFor({
-            workspaceName: info.workspaceName,
-            workspaceId: info.workspaceId,
-            previousName: readLastEndpoint(info.workspaceId)?.connectorName,
-            hadEndpointBefore: Boolean(readLastEndpoint(info.workspaceId)),
-          });
-      const pairingResult = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
-      const tunnelState = readTunnelState(info.workspaceId);
-      if (opts.json) {
-        say(
-          JSON.stringify({
-            ok: true,
-            workspaceId: info.workspaceId,
-            workspaceName: info.workspaceName,
-            connectorName,
-            mcpUrl: mcpUrl ?? `http://127.0.0.1:${runtime.port}/mcp`,
-            local: mcpUrl === null,
-            pairingCode: pairingResult.code,
-            pairingExpiresAt: pairingResult.expiresAt,
-            sandbox,
-            tunnel: {
-              mode: isNamedTunnelReady(tunnelState) ? "named" : "quick",
-              hostname: tunnelState.hostname ?? null,
-              fallback: Boolean(tunnelState.fallbackReason),
-            },
-          })
-        );
-        return;
-      }
-      check(`当前项目已识别（${info.workspaceName}）`);
-      check("Workspace Bridge 已启动");
-      if (mcpUrl) check("安全连接已建立");
-      say("");
-      say(`连接地址：${mcpUrl ?? `http://127.0.0.1:${runtime.port}/mcp`}`);
-      say(`配对码：${pairingResult.code}（${Math.round((pairingResult.expiresAt - Date.now()) / 60000)} 分钟内有效）`);
-      say("");
-      say("下一步：在 ChatGPT 的连接器设置中添加以上地址（OAuth），并在授权页输入配对码。");
-      say("如果你在使用 Codex Skill，这一步会自动完成。");
     } catch (error) {
       handleCliError(error, opts.json);
     }
@@ -378,7 +529,7 @@ program
     say("");
     check(`Workspace：${info.workspaceName}`);
     check(`Bridge：运行中（端口 ${info.port}）`);
-    if (info.tunnel.running && info.tunnel.url) check(`安全连接：${info.tunnel.url}/mcp`);
+    if (info.tunnel.running && info.tunnel.url) check(`安全连接：${mcpUrlFromPublic(info.tunnel.url)}`);
     else say("· 安全连接：未启用（本地模式）");
     say(`· 已授权连接：${info.tokenCount > 0 ? "是" : "否"}`);
   });
@@ -387,21 +538,128 @@ program
 
 program
   .command("doctor")
+  .alias("setup")
   .description("Diagnose and auto-repair the connection")
   .option("-w, --workspace <path>")
   .option("--no-fix", "diagnose only, do not repair")
+  .option("--diagnose-only", "diagnose only, do not repair", false)
+  .option("--no-tunnel", "do not start or recover a public connection")
+  .option("--direct", "prepare the current Codex task without a ChatGPT Web conversation", false)
+  .option(
+    "--browser-gate <gate>",
+    "observed ChatGPT gate: connector_replaced, chatgpt_login, or administrator_approval"
+  )
+  .option("--browser-page <url>", "current ChatGPT page for an observed browser gate")
+  .option("--browser-endpoint <url>", "endpoint visibly present in the Connector browser page")
   .option("--json", "machine-readable output", false)
-  .action(async (opts: { workspace?: string; fix: boolean; json: boolean }) => {
+  .action(async (opts: {
+    workspace?: string;
+    fix: boolean;
+    diagnoseOnly: boolean;
+    tunnel: boolean;
+    direct: boolean;
+    browserGate?: string;
+    browserPage?: string;
+    browserEndpoint?: string;
+    json: boolean;
+  }) => {
+    let localTaskId: string;
+    try {
+      localTaskId = hostTaskId();
+    } catch (error) {
+      handleCliError(error, opts.json);
+      return;
+    }
     const root = resolveWorkspace(opts.workspace);
-    const report: Record<string, { ok: boolean; detail?: string }> = {};
+    const browserGate = opts.browserGate as DoctorBrowserGate | undefined;
+    if (
+      browserGate &&
+      browserGate !== "connector_replaced" &&
+      browserGate !== "chatgpt_login" &&
+      browserGate !== "administrator_approval"
+    ) {
+      handleCliError(
+        new Error("browser-gate must be connector_replaced, chatgpt_login, or administrator_approval"),
+        opts.json
+      );
+      return;
+    }
+    const shouldFix = opts.fix && !opts.diagnoseOnly;
+    const report: Record<string, DoctorCheck> = {};
     const results: string[] = [];
+    let recoveryLease: RecoveryLeaseHandle | null = null;
+    let migration: LegacyMigrationResult | null = null;
+
+    if (shouldFix) {
+      let requested: Workspace | null = null;
+      try {
+        requested = new Workspace(root);
+      } catch {
+        // Workspace validation below renders the existing structured error.
+      }
+      if (requested) {
+        const acquisition = acquireRecoveryLease({
+          workspaceId: requested.id,
+          workspaceRoot: requested.root,
+        });
+        if (acquisition.status !== "acquired") {
+          const result = createRecoveryLeaseDoctorResult(
+            acquisition.status,
+            acquisition.status === "busy"
+              ? "另一个恢复正在进行，请稍后安全重试"
+              : "恢复 owner 状态无法安全确认，未执行任何修复",
+            {
+              developerMode: CHATGPT_DEVELOPER_MODE_URL,
+              plugins: CHATGPT_PLUGINS_URL,
+              createConnector: CHATGPT_CREATE_CONNECTOR_URL,
+            },
+            doctorRequestedWorkspaceIdentity(root, requested)
+          );
+          process.exitCode = DOCTOR_EXIT_STATUS[result.outcome];
+          say(
+            opts.json
+              ? JSON.stringify(sanitizeDiagnosticValue(result))
+              : sanitizeDiagnosticText(renderDoctorResult(result, PRODUCT_NAME, { recoveryLease: "Recovery" }))
+          );
+          return;
+        }
+        recoveryLease = acquisition.lease;
+      }
+    }
+
+    try {
+
+    if (shouldFix && recoveryLease) {
+      recoveryLease.updatePhase("migration");
+      const bridgeBeforeMigration = hasLegacyStateToMigrate()
+        ? await findBridgeObservation()
+        : null;
+      if (bridgeBeforeMigration?.state !== "unknown") {
+        let bridgeForReload = bridgeBeforeMigration?.state === "healthy"
+          ? bridgeBeforeMigration.runtime
+          : null;
+        if (bridgeForReload && !(await bridgeSupportsRecovery(bridgeForReload))) {
+          const ensured = await ensureBridge(root);
+          bridgeForReload = ensured.runtime;
+          if (ensured.spawned) results.push("已自动启动 Bridge");
+          else if (ensured.activated) results.push("已激活目标 Workspace");
+        }
+        migration = migrateLegacyState();
+        if (migration.status !== "not_needed" && bridgeForReload) {
+          await adminFetch(bridgeForReload, "POST", "/admin/auth/reload");
+        }
+        if (migration.status !== "not_needed") acknowledgeLegacyRuntimeReload();
+        if (migration.status === "migrated") results.push("已保守迁移旧连接状态");
+      }
+    }
 
     // Node
     const nodeMajor = parseInt(process.versions.node.split(".")[0], 10);
     report.node = { ok: nodeMajor >= 20, detail: `v${process.versions.node}` };
 
     // Codex sandbox writable_roots (so later chats do not need elevation)
-    if (opts.fix) {
+    if (shouldFix && recoveryLease) {
+      recoveryLease.updatePhase("sandbox");
       const sandbox = trySandboxAllow();
       if (sandbox.ok) {
         report.sandbox = { ok: true, detail: sandbox.alreadyAllowed ? "已在白名单" : "已写入白名单" };
@@ -429,32 +687,65 @@ program
       report.workspace = { ok: false, detail: (error as Error).message };
     }
 
+    const requestedWorkspace = doctorRequestedWorkspaceIdentity(root, workspace);
+
     // Bridge
+    recoveryLease?.updatePhase("bridge");
     let runtime: RuntimeState | null = null;
     let bridgeUnknown = false;
+    let bridgeStopped = false;
+    let activeWorkspace: DoctorWorkspaceIdentity | null = null;
+    let bridgeObservation: DoctorBridgeObservation = { state: "not_checked", reason: null };
     if (workspace) {
       const observation = await findBridgeObservation(workspace.id);
+      bridgeObservation = {
+        state: observation.state,
+        reason: observation.state === "healthy" ? null : observation.reason,
+      };
       if (observation.state === "healthy") {
-        runtime = observation.runtime;
-      } else if (observation.state === "unknown") {
+        activeWorkspace = doctorRuntimeWorkspaceIdentity(observation.runtime);
+      }
+      if (observation.state === "unknown") {
         bridgeUnknown = true;
         report.bridge = { ok: false, detail: `状态无法确认（${observation.reason}），未自动修复` };
-      } else if (opts.fix) {
+      } else if (shouldFix && recoveryLease) {
         try {
-          runtime = (await ensureBridge(root)).runtime;
-          results.push("已自动启动 Bridge");
+          if (opts.direct && observation.state === "healthy") {
+            runtime = observation.runtime;
+          } else {
+            const ensured = await ensureBridge(root);
+            runtime = ensured.runtime;
+            if (ensured.spawned) results.push("已自动启动 Bridge");
+            else if (ensured.activated) results.push("已激活目标 Workspace");
+          }
+          bridgeObservation = { state: "healthy", reason: null };
         } catch (error) {
           report.bridge = { ok: false, detail: (error as Error).message };
         }
+      } else if (observation.state === "healthy") {
+        if (
+          opts.direct ||
+          (observation.runtime.workspaceId === workspace.id &&
+            observation.runtime.workspaceRoot === workspace.root)
+        ) {
+          runtime = observation.runtime;
+        } else {
+          report.bridge = { ok: false, detail: "当前 Bridge 未激活请求的 Workspace" };
+        }
+      } else {
+        bridgeStopped = true;
       }
-      if (runtime) report.bridge = { ok: true, detail: `端口 ${runtime.port}` };
+      if (runtime) {
+        activeWorkspace = doctorRuntimeWorkspaceIdentity(runtime);
+        report.bridge = { ok: true, detail: `端口 ${runtime.port}` };
+      }
       else report.bridge = report.bridge ?? { ok: false, detail: "未运行" };
     }
 
     // MCP local reachability (401 without token means MCP + auth both work)
     if (runtime) {
       try {
-        const response = await fetch(`http://127.0.0.1:${runtime.port}/mcp`, {
+        const response = await fetch(`http://127.0.0.1:${runtime.port}/mcp/session`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ jsonrpc: "2.0", method: "ping", id: 1 }),
@@ -469,6 +760,7 @@ program
     // Tunnel + remote reachability. If this workspace once had a public URL,
     // a full quit reclaims it — restore a tunnel and tell the Skill to update
     // the existing ChatGPT connector (never treat that as "local mode").
+    recoveryLease?.updatePhase("tunnel");
     const lastEndpoint = workspace ? readLastEndpoint(workspace.id) : null;
     const connectorName = workspace
       ? connectorNameFor({
@@ -477,26 +769,27 @@ program
           previousName: lastEndpoint?.connectorName,
           hadEndpointBefore: Boolean(lastEndpoint),
         })
-      : "Codex with ChatGPT";
+      : DEFAULT_CONNECTOR_NAME;
     const tunnelState = workspace ? readTunnelState(workspace.id) : null;
     const namedReady = tunnelState ? isNamedTunnelReady(tunnelState) : false;
-    let namedRepair: { needed: boolean; userMessage?: string } = { needed: false };
-    let chatgptRepair: {
-      needed: boolean;
-      reason?: string;
-      connectorAction: "none" | "create" | "update";
-      connectorName: string;
-      userMessage?: string;
-      mcpUrl: string | null;
-      previousMcpUrl: string | null;
-      pairingCode?: string;
-      pairingExpiresAt?: number;
-      pages: {
-        developerMode: string;
-        plugins: string;
-        createConnector: string;
-      };
-    } = {
+    let namedRepair: DoctorNamedRepair = { needed: false };
+    let tunnelFailure: "cloudflared_missing" | "transport_down" | "probe_inconclusive" | undefined;
+    let currentIdentityMcp = namedReady && tunnelState?.hostname
+      ? mcpUrlFromPublic(`https://${tunnelState.hostname}`)
+      : null;
+    const tunnelResult: DoctorTunnelResult = {
+      provider: tunnelState?.provider ?? null,
+      component: "unknown",
+      cloudflareLogin: namedReady ? "not_checked" : "not_applicable",
+      publicHealth: "not_checked",
+    };
+    let authorization: DoctorAuthorizationResult = {
+      state: "not_configured",
+      clientId: null,
+      proof: null,
+      recoverable: false,
+    };
+    let chatgptRepair: DoctorChatgptRepair = {
       needed: false,
       connectorAction: "none",
       connectorName,
@@ -508,59 +801,87 @@ program
         createConnector: CHATGPT_CREATE_CONNECTOR_URL,
       },
     };
+    let connectorReplacementCompleted = false;
 
     if (runtime) {
       let info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-      if (namedReady && opts.fix && info.tunnel.provider !== "cloudflare-named") {
-        await stopBridge(root);
-        await new Promise((resolve) => setTimeout(resolve, 400));
-        try {
-          runtime = (await ensureBridge(root)).runtime;
-          info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
-          results.push("已切换到固定域名连接");
-        } catch (error) {
-          report.tunnel = { ok: false, detail: (error as Error).message };
-        }
-      }
-      const expectedPublic = Boolean(lastEndpoint?.publicUrl) || namedReady;
+      const expectedPublic =
+        Boolean(lastEndpoint?.publicUrl) ||
+        tunnelState?.preference === "quick" ||
+        namedReady ||
+        info.tunnel.running;
       let currentUrl = info.publicUrl ?? info.tunnel.url;
-      let healthy = false;
-      if (currentUrl) {
-        try {
-          const response = await fetch(`${currentUrl}/health`, { signal: AbortSignal.timeout(8000) });
-          healthy = response.ok;
-        } catch {
-          healthy = false;
-        }
+      try {
+        const tunnelDoctor = await adminFetch<TunnelDoctorReport>(runtime, "GET", "/admin/tunnel/doctor");
+        tunnelResult.provider = tunnelDoctor.provider;
+        tunnelResult.component = tunnelDoctor.binaryFound ? "available" : "missing";
+      } catch {
+        tunnelResult.component = detectTunnelBinaries().cloudflared ? "available" : "missing";
+      }
+      if (namedReady && tunnelResult.component !== "missing") {
+        tunnelResult.cloudflareLogin = hasCloudflaredCert() ? "ready" : "required";
+      }
+      tunnelResult.publicHealth = await probePublicHealth(currentUrl, info.workspaceId);
+      if (tunnelResult.publicHealth === "passed" && tunnelResult.component !== "missing") {
+        tunnelFailure = undefined;
       }
 
-      if ((!currentUrl || !healthy) && opts.fix && (expectedPublic || info.tunnel.running)) {
+      if (expectedPublic && tunnelResult.component === "missing") {
+        report.tunnel = { ok: false, detail: "NEED_CLOUDFLARED" };
+        tunnelFailure = "cloudflared_missing";
+      } else if (expectedPublic && namedReady && tunnelResult.cloudflareLogin === "required") {
+        report.tunnel = { ok: false, detail: "CLOUDFLARE_LOGIN_REQUIRED" };
+        namedRepair = { needed: true, userMessage: NAMED_REPAIR_MESSAGE };
+        tunnelFailure = undefined;
+      } else if (
+        expectedPublic &&
+        tunnelResult.publicHealth !== "passed" &&
+        shouldFix &&
+        opts.tunnel &&
+        recoveryLease &&
+        !tunnelFailure
+      ) {
         try {
-          const binaries = detectTunnelBinaries();
-          if (!binaries.cloudflared) {
-            report.tunnel = { ok: false, detail: "NEED_CLOUDFLARED" };
-          } else {
-            const started = await adminFetch<TunnelStartResponse>(runtime, "POST", "/admin/tunnel/start", 90_000);
-            if (started.url) {
-              const previousUrl = lastEndpoint?.publicUrl;
-              currentUrl = started.url;
-              healthy = true;
-              info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+          const started = await adminFetch<TunnelStartResponse>(runtime, "POST", "/admin/tunnel/start", 90_000);
+          if (started.url) {
+            const previousUrl = lastEndpoint?.publicUrl;
+            currentUrl = started.url;
+            tunnelResult.publicHealth = await probePublicHealth(currentUrl, info.workspaceId);
+            info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+            if (tunnelResult.publicHealth === "passed") {
               const sameAddress =
                 previousUrl && normalizePublicUrl(previousUrl) === normalizePublicUrl(started.url);
               results.push(sameAddress ? "已重新建立安全连接" : "已重新建立安全连接（地址已更换）");
             }
           }
         } catch (error) {
-          report.tunnel = { ok: false, detail: (error as Error).message };
+          const message = (error as Error).message;
+          report.tunnel = { ok: false, detail: message };
+          if (message.includes("NEED_CLOUDFLARED") || /cloudflared is not installed/i.test(message)) {
+            tunnelResult.component = "missing";
+            tunnelFailure = "cloudflared_missing";
+          } else if (namedReady && requiresCloudflareLogin(message)) {
+            tunnelResult.cloudflareLogin = "required";
+            namedRepair = { needed: true, userMessage: NAMED_REPAIR_MESSAGE };
+            tunnelFailure = undefined;
+          } else {
+            tunnelFailure = "probe_inconclusive";
+          }
         }
       }
 
-      if (currentUrl && healthy) {
+      if (currentUrl && tunnelResult.publicHealth === "passed") {
         report.tunnel = { ok: true, detail: currentUrl };
         const nextMcp = mcpUrlFromPublic(currentUrl);
+        currentIdentityMcp = nextMcp;
         const action = connectorAction(lastEndpoint?.mcpUrl, nextMcp);
-        const boundName = nextMcp
+        connectorReplacementCompleted =
+          action !== "none" &&
+          shouldFix &&
+          Boolean(recoveryLease) &&
+          observedConnectorReplacement(browserGate, opts.browserPage, opts.browserEndpoint, nextMcp);
+        const boundName = nextMcp && shouldFix && recoveryLease &&
+          (action === "none" || connectorReplacementCompleted)
           ? persistWorkspaceEndpoint({
               workspaceId: info.workspaceId,
               workspaceName: info.workspaceName,
@@ -569,45 +890,39 @@ program
               mcpUrl: nextMcp,
               previous: lastEndpoint,
             })
-          : connectorName;
+          : connectorNameFor({
+              workspaceName: info.workspaceName,
+              workspaceId: info.workspaceId,
+              previousName: lastEndpoint?.connectorName,
+              hadEndpointBefore: Boolean(lastEndpoint),
+              replacingEndpoint: action === "update",
+            });
         chatgptRepair = {
           ...chatgptRepair,
-          needed: action === "update",
-          reason: action === "update" ? "address_reclaimed" : undefined,
-          connectorAction: action,
+          needed: action !== "none" && !connectorReplacementCompleted,
+          reason: connectorReplacementCompleted
+            ? undefined
+            : action === "update"
+              ? "address_reclaimed"
+              : action === "create"
+                ? "connector_missing"
+                : undefined,
+          connectorAction: connectorReplacementCompleted ? "none" : action,
           connectorName: boundName,
-          userMessage: action === "update" ? reclaimUserMessage(boundName) : undefined,
+          userMessage: action === "update" && !connectorReplacementCompleted
+            ? reclaimUserMessage(boundName)
+            : undefined,
           mcpUrl: nextMcp,
           previousMcpUrl: lastEndpoint?.mcpUrl ?? null,
         };
-        if (action === "update") {
-          try {
-            const pairing = await adminFetch<PairingResponse>(runtime, "POST", "/admin/pairing");
-            chatgptRepair.pairingCode = pairing.code;
-            chatgptRepair.pairingExpiresAt = pairing.expiresAt;
-            results.push(`已生成新的配对码，需要更新「${boundName}」`);
-          } catch (error) {
-            report.oauth = { ok: false, detail: (error as Error).message };
-          }
-        }
-      } else if (namedReady) {
-        report.tunnel = report.tunnel ?? { ok: false, detail: "NAMED_TUNNEL_DOWN" };
-        namedRepair = { needed: true, userMessage: NAMED_REPAIR_MESSAGE };
-      } else if (expectedPublic) {
-        report.tunnel = report.tunnel ?? { ok: false, detail: "安全连接未恢复" };
-        chatgptRepair = {
-          ...chatgptRepair,
-          needed: true,
-          reason: "address_reclaimed",
-          connectorAction: "update",
-          connectorName,
-          userMessage: reclaimUserMessage(connectorName),
-          mcpUrl: null,
+      } else if (expectedPublic && !namedRepair.needed && !tunnelFailure) {
+        report.tunnel = report.tunnel ?? {
+          ok: false,
+          detail: tunnelResult.publicHealth === "failed" ? "PUBLIC_HEALTH_FAILED" : "PUBLIC_HEALTH_UNKNOWN",
         };
+        tunnelFailure = tunnelResult.publicHealth === "failed" ? "transport_down" : "probe_inconclusive";
       } else if (!currentUrl) {
         report.tunnel = { ok: true, detail: "未启用（本地模式）" };
-      } else {
-        report.tunnel = { ok: false, detail: "公网地址无法访问" };
       }
     } else if (bridgeUnknown) {
       report.tunnel = report.tunnel ?? { ok: false, detail: "Bridge 状态无法确认，未执行连接器修复" };
@@ -626,12 +941,56 @@ program
       };
     }
 
-    if (opts.json) {
-      say(JSON.stringify({ report, repairs: results, chatgptRepair, namedRepair }));
-      return;
+    const previousFingerprint = endpointFingerprint(lastEndpoint?.mcpUrl);
+    const currentFingerprint = endpointFingerprint(currentIdentityMcp);
+    const endpointIdentity = {
+      changed: Boolean(
+        previousFingerprint && currentFingerprint && previousFingerprint !== currentFingerprint
+      ),
+      previousFingerprint,
+      currentFingerprint,
+    };
+
+    if (
+      (lastEndpoint?.mcpUrl || connectorReplacementCompleted) &&
+      !chatgptRepair.needed &&
+      !namedRepair.needed
+    ) {
+      if (tunnelResult.publicHealth !== "passed") {
+        authorization = {
+          state: "unreachable",
+          clientId: null,
+          proof: null,
+          recoverable: false,
+        };
+        report.oauth = { ok: false, detail: "授权状态无法从当前网络探测确认" };
+      } else if (runtime) {
+        const info = await adminFetch<AdminInfo>(runtime, "GET", "/admin/info");
+        authorization = info.authorization;
+        const disposition = authorizationDisposition(authorization);
+        report.oauth = {
+          ok: disposition === "usable",
+          detail: authorization.state === "identity_mismatch"
+            ? authorization.reason
+            : authorization.state,
+        };
+      }
     }
-    say(`${PRODUCT_NAME} Doctor`);
-    say("");
+    if (
+      migration?.status === "consent_required" &&
+      !chatgptRepair.needed &&
+      !namedRepair.needed &&
+      !tunnelFailure
+    ) {
+      authorization = {
+        state: "missing",
+        clientId: null,
+        proof: null,
+        recoverable: false,
+      };
+      report.oauth = { ok: false, detail: `legacy_migration:${migration.reason}` };
+    }
+
     const labels: Record<string, string> = {
       node: "Node.js",
       sandbox: "Sandbox",
@@ -641,37 +1000,43 @@ program
       oauth: "OAuth",
       tunnel: "Tunnel",
     };
-    let allOk = true;
-    for (const [key, value] of Object.entries(report)) {
-      const label = labels[key] ?? key;
-      if (value.ok) check(`${label}${value.detail ? `（${value.detail}）` : ""}`);
-      else {
-        cross(`${label}${value.detail ? `：${value.detail}` : ""}`);
-        allOk = false;
-      }
-    }
-    for (const repair of results) say(`· ${repair}`);
-    say("");
-    if (namedRepair.needed && namedRepair.userMessage) {
-      say(namedRepair.userMessage);
-      say("");
-    }
-    if (chatgptRepair.needed && chatgptRepair.userMessage) {
-      say(chatgptRepair.userMessage);
-      if (chatgptRepair.mcpUrl) say(`新的连接地址：${chatgptRepair.mcpUrl}`);
-      if (chatgptRepair.pairingCode) say(`配对码：${chatgptRepair.pairingCode}`);
-      say("");
-    }
+    const taskSession = workspace && migration?.status !== "consent_required"
+      ? readSession(workspace.id, localTaskId)
+      : null;
+    const result = applyDoctorBrowserGate(createDoctorResult({
+      report,
+      repairs: results,
+      chatgptRepair,
+      namedRepair,
+      endpointIdentity,
+      tunnel: tunnelResult,
+      authorization,
+      migration,
+      authorizationPage: CHATGPT_PLUGINS_URL,
+      direct: opts.direct,
+      legacySessionAmbiguous: Boolean(workspace && !taskSession && readSession(workspace.id)),
+      tunnelFailure,
+      bridgeStopped,
+      bridgeUnknown,
+      requestedWorkspace,
+      activeWorkspace,
+      bridgeObservation,
+      conversation: workspace
+        ? {
+            workspaceId: workspace.id,
+            ...resolveConversation(taskSession),
+          }
+        : null,
+    }), browserGate, opts.browserPage);
+    process.exitCode = DOCTOR_EXIT_STATUS[result.outcome];
     say(
-      allOk && !chatgptRepair.needed && !namedRepair.needed
-        ? "Everything looks good."
-        : chatgptRepair.needed
-          ? "本地已就绪，还需要在 ChatGPT 删除并重新添加该连接。"
-          : namedRepair.needed
-            ? "固定域名还没连上，需要先登录 Cloudflare。"
-            : "仍有问题未解决，可尝试 `c2c restart --tunnel`。"
+      opts.json
+        ? JSON.stringify(sanitizeDiagnosticValue(result))
+        : sanitizeDiagnosticText(renderDoctorResult(result, PRODUCT_NAME, labels))
     );
-    if (!allOk || namedRepair.needed) process.exitCode = 1;
+    } finally {
+      recoveryLease?.release();
+    }
   });
 
 // ---------------------------------------------------------------- pair / unpair
@@ -697,7 +1062,7 @@ program
 
 program
   .command("unpair")
-  .description("Revoke ChatGPT's access to this workspace immediately")
+  .description("Revoke ChatGPT's machine-global Bridge access immediately")
   .option("-w, --workspace <path>")
   .action(async (opts: { workspace?: string }) => {
     const root = resolveWorkspace(opts.workspace);
@@ -707,9 +1072,9 @@ program
       await adminFetch(runtime, "POST", "/admin/revoke-all");
     } else {
       // bridge not running: revoke directly in the persisted store
-      new AuthStore(workspace.id).revokeAll();
+      new AuthStore({ onRevoke: () => new WorkspaceBindingStore().clear() }).revokeAll();
     }
-    check("已断开 ChatGPT 对当前项目的访问（所有令牌已吊销）");
+    check("已断开 ChatGPT 对本机全局 Bridge 的访问（所有令牌已吊销）");
   });
 
 // ---------------------------------------------------------------- logs / workspace / record
@@ -756,8 +1121,7 @@ program
 
 // ---------------------------------------------------------------- sandbox-allow (Codex writable_roots, macOS + Windows)
 
-program
-  .command("sandbox-allow")
+acceptUnusedWorkspaceOption(program.command("sandbox-allow"))
   .description("Add the local settings directory to the Codex sandbox allowlist")
   .option("--json", "machine-readable output", false)
   .action((opts: { json: boolean }) => {
@@ -786,12 +1150,12 @@ function runGit(args: string[]): { ok: boolean; stdout: string } {
     encoding: "utf8",
     timeout: 8000,
     env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+    windowsHide: true,
   });
   return { ok: result.status === 0, stdout: (result.stdout ?? "").trim() };
 }
 
-program
-  .command("update-check")
+acceptUnusedWorkspaceOption(program.command("update-check"))
   .description("Check GitHub for a newer version (real check at most once per local day)")
   .option("--force", "check even if already checked today", false)
   .option("--json", "machine-readable output", false)
@@ -849,24 +1213,32 @@ session
   .option("-w, --workspace <path>")
   .option("--json", "machine-readable output", false)
   .action((opts: { workspace?: string; json: boolean }) => {
-    const workspace = new Workspace(resolveWorkspace(opts.workspace));
-    const saved = readSession(workspace.id);
-    const conversation = resolveConversation(saved);
-    if (opts.json) say(JSON.stringify({ ok: true, session: saved, conversation }));
-    else if (!saved) {
-      say("尚未记录 ChatGPT 会话。新仓库默认使用 Project 合集。");
-    } else {
-      say(`模式：${conversation.mode === "project" ? "Project 合集" : "长对话"}`);
-      if (conversation.projectUrl) say(`合集：${conversation.projectUrl}`);
-      if (saved.title) say(`会话：${saved.title}`);
-      if (saved.url) say(`对话：${saved.url}`);
-      if (saved.connectorName) say(`连接器：${saved.connectorName}`);
-      if (saved.taskId) say(`任务：${saved.taskId}（第 ${saved.iteration ?? 0} 轮，${saved.lastState ?? "?"}）`);
-      if (saved.checkpoint) {
-        say(
-          `存档：${saved.checkpoint.protocolState} / 等待 ${saved.checkpoint.waitingFor}（第 ${saved.checkpoint.iteration} 轮）`
-        );
+    try {
+      const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const taskId = hostTaskId();
+      const saved = readSession(workspace.id, taskId);
+      const conversation = resolveConversation(saved);
+      const legacyOwnership = !saved && readSession(workspace.id) ? "ambiguous" : "none";
+      if (opts.json) say(JSON.stringify({ ok: true, session: saved, conversation, legacyOwnership }));
+      else if (!saved) {
+        say(legacyOwnership === "ambiguous"
+          ? "发现旧 workspace 会话；请明确认领或为当前 task 新建会话。"
+          : "尚未记录 ChatGPT 会话。新仓库默认使用 Project 合集。");
+      } else {
+        say(`模式：${conversation.mode === "project" ? "Project 合集" : "长对话"}`);
+        if (conversation.projectUrl) say(`合集：${conversation.projectUrl}`);
+        if (saved.title) say(`会话：${saved.title}`);
+        if (saved.url) say(`对话：${saved.url}`);
+        if (saved.connectorName) say(`连接器：${saved.connectorName}`);
+        if (saved.taskId) say(`任务：${saved.taskId}（第 ${saved.iteration ?? 0} 轮，${saved.lastState ?? "?"}）`);
+        if (saved.checkpoint) {
+          say(
+            `存档：${saved.checkpoint.protocolState} / 等待 ${saved.checkpoint.waitingFor}（第 ${saved.checkpoint.iteration} 轮）`
+          );
+        }
       }
+    } catch (error) {
+      handleCliError(error, opts.json);
     }
   });
 
@@ -881,7 +1253,7 @@ session
   .option("--state <state>", "last protocol state, e.g. EXECUTED")
   .option("--mode <mode>", "long-chat or project")
   .option("--project-url <url>", "ChatGPT Project collection URL (…/g/g-p-…/project)")
-  .option("--connector-name <name>", "exact connector title for this workspace")
+  .option("--connector-name <name>", "exact machine-global connector title")
   .option("--protocol-state <state>", "checkpoint protocol state, e.g. EXECUTED_SENT")
   .option("--waiting-for <who>", "none | GPT_PLAN | GPT_REVIEW | USER")
   .option("--goal <text>", "original task goal for resume / HANDOFF")
@@ -909,6 +1281,7 @@ session
       clearCheckpoint: boolean;
     }) => {
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const hostOwner = hostTaskId();
       const modeRaw = opts.mode?.trim().toLowerCase();
       if (modeRaw && modeRaw !== "long-chat" && modeRaw !== "project") {
         throw new Error("mode must be long-chat or project");
@@ -926,7 +1299,7 @@ session
       if (waitingNorm && !WAITING_FOR.includes(waitingNorm as WaitingFor)) {
         throw new Error(`waiting-for must be one of ${WAITING_FOR.join(", ")}`);
       }
-      const saved = mergeSession(readSession(workspace.id), {
+      const saved = mergeSession(readSession(workspace.id, hostOwner), {
         url: opts.url,
         title: opts.title,
         taskId: opts.task,
@@ -947,7 +1320,7 @@ session
             }
           : undefined,
       });
-      writeSession(workspace.id, saved);
+      writeSession(workspace.id, saved, hostOwner);
       if (saved.projectUrl && saved.conversationMode === "project") {
         check("已记录 ChatGPT 合集，后续从合集页新开或复用对话");
       } else {
@@ -962,14 +1335,46 @@ session
   .option("-w, --workspace <path>")
   .action((opts: { workspace?: string }) => {
     const workspace = new Workspace(resolveWorkspace(opts.workspace));
-    const result = clearChatPointer(workspace.id);
+    const result = clearChatPointer(workspace.id, hostTaskId());
     if (!result.cleared) say("尚未记录 ChatGPT 会话。");
     else if (result.keptProject) check("已清除当前对话，合集绑定仍保留");
     else check("已清除会话记录，下次任务将新建 ChatGPT 会话");
   });
 
-const prefsCmd = program
-  .command("prefs")
+session
+  .command("start-new")
+  .description("Start a new task session while retaining safe legacy Project metadata")
+  .option("-w, --workspace <path>")
+  .option("--json", "machine-readable output", false)
+  .action((opts: { workspace?: string; json: boolean }) => {
+    try {
+      const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const saved = startNewTaskSession(workspace.id, hostTaskId());
+      if (opts.json) say(JSON.stringify({ ok: true, session: saved }));
+      else check("已为当前 task 新建独立会话记录");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+session
+  .command("claim-legacy")
+  .description("Assign the legacy workspace session to the current host task")
+  .option("-w, --workspace <path>")
+  .option("--json", "machine-readable output", false)
+  .action((opts: { workspace?: string; json: boolean }) => {
+    try {
+      const workspace = new Workspace(resolveWorkspace(opts.workspace));
+      const saved = claimLegacySession(workspace.id, hostTaskId());
+      if (opts.json) say(JSON.stringify({ ok: true, claimed: Boolean(saved), session: saved }));
+      else if (saved) check("已将旧 workspace 会话归属到当前 task");
+      else say("没有可认领的旧 workspace 会话。");
+    } catch (error) {
+      handleCliError(error, opts.json);
+    }
+  });
+
+const prefsCmd = acceptUnusedWorkspaceOption(program.command("prefs"))
   .description("Remember ChatGPT developer mode and setup choice for this machine");
 
 prefsCmd
@@ -1024,7 +1429,7 @@ program
   .description("Record a Codex execution summary (used by the Skill)")
   .option("-w, --workspace <path>")
   .requiredOption("--task <id>")
-  .requiredOption("--iteration <n>")
+  .requiredOption("--iteration <n>", "non-negative execution iteration", parseNonNegativeInteger)
   .option("--changed-files <filesOrCount>", "comma-separated files or a count", "0")
   .option("--tests <summary>", "e.g. '27 passed'")
   .option("--exit-status <status>", "ok | failed | blocked", "ok")
@@ -1032,12 +1437,12 @@ program
   .option("--command <text>", "command whose output may be offered to ChatGPT")
   .option("--output <text>", "command output (prefer --output-file for long logs)")
   .option("--output-file <path>", "read command output from a local file")
-  .option("--exit-code <n>", "numeric exit code of that command")
+  .option("--exit-code <n>", "numeric exit code of that command", parseInteger)
   .action(
     (opts: {
       workspace?: string;
       task: string;
-      iteration: string;
+      iteration: number;
       changedFiles: string;
       tests?: string;
       exitStatus: string;
@@ -1045,12 +1450,10 @@ program
       command?: string;
       output?: string;
       outputFile?: string;
-      exitCode?: string;
+      exitCode?: number;
     }) => {
       const workspace = new Workspace(resolveWorkspace(opts.workspace));
-      const changed = /^\d+$/.test(opts.changedFiles)
-        ? parseInt(opts.changedFiles, 10)
-        : opts.changedFiles.split(",").map((file) => file.trim()).filter(Boolean);
+      const changed = parseChangedFiles(opts.changedFiles);
       let outputId: number | undefined;
       let outputAvailable = false;
       const rawOutput =
@@ -1061,16 +1464,16 @@ program
         const savedOutput = saveExecutionOutput(workspace.id, {
           command: opts.command,
           raw: rawOutput,
-          exitCode: opts.exitCode !== undefined ? parseInt(opts.exitCode, 10) : null,
+          exitCode: opts.exitCode ?? null,
           taskId: opts.task,
-          iteration: parseInt(opts.iteration, 10),
+          iteration: opts.iteration,
         });
         outputId = savedOutput.id;
         outputAvailable = savedOutput.allowed;
       }
       appendExecutionRecord(workspace.id, {
         taskId: opts.task,
-        iteration: parseInt(opts.iteration, 10),
+        iteration: opts.iteration,
         changedFiles: changed,
         tests: opts.tests ?? null,
         exitStatus: opts.exitStatus,
@@ -1085,11 +1488,11 @@ program
     }
   );
 
-const tunnelCmd = program.command("tunnel").description("Choose or inspect the public connection for this workspace");
+const tunnelCmd = program.command("tunnel").description("Choose or inspect the machine-global public connection");
 
 tunnelCmd
   .command("status", { isDefault: true })
-  .description("Show whether this workspace still needs a one-time connection choice")
+  .description("Show whether this machine still needs a one-time connection choice")
   .option("-w, --workspace <path>")
   .option("--zone <domain>", "optional domain, used to preview the stable hostname")
   .option("--json", "machine-readable output", false)
@@ -1115,7 +1518,7 @@ tunnelCmd
   .requiredOption("--mode <mode>", "quick or named")
   .option("-w, --workspace <path>")
   .option("--zone <domain>", "Cloudflare domain for a named hostname")
-  .option("--hostname <hostname>", "override the default c2c-<project>.<zone>")
+  .option("--hostname <hostname>", "override the suggested c2c hostname")
   .option("--json", "machine-readable output", false)
   .action(async (opts: { mode: string; workspace?: string; zone?: string; hostname?: string; json: boolean }) => {
     const root = resolveWorkspace(opts.workspace);
@@ -1157,6 +1560,7 @@ tunnelCmd
         workspaceName: workspace.name,
         zone,
         hostname: opts.hostname,
+        onLoginUrl: (page) => emitCloudflareLoginAction(page, opts.json),
       });
       if (await findLiveBridge(workspace.id)) await stopBridge(root);
       const payload = {
@@ -1178,15 +1582,15 @@ tunnelCmd
     }
   });
 
-tunnelCmd
-  .command("login")
+acceptUnusedWorkspaceOption(tunnelCmd.command("login"))
   .description("Open the Cloudflare login window used by a named hostname")
   .option("--json", "machine-readable output", false)
-  .action(async (opts: { json: boolean }) => {
+  .option("--force", "replace an existing rejected Cloudflare login certificate", false)
+  .action(async (opts: { force: boolean; json: boolean }) => {
     try {
       if (!opts.json) say(NAMED_LOGIN_PROMPT);
       const account = new ProcessCloudflaredAccount();
-      await account.login();
+      await account.login((page) => emitCloudflareLoginAction(page, opts.json), opts.force);
       const payload = { ok: true, loggedIn: hasCloudflaredCert() };
       if (opts.json) say(JSON.stringify(payload));
       else check("Cloudflare 已登录");
@@ -1196,7 +1600,7 @@ tunnelCmd
   });
 
 function handleCliError(error: unknown, json: boolean): void {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = sanitizeDiagnosticText(error instanceof Error ? error.message : String(error));
   if (json) {
     say(JSON.stringify({ ok: false, error: message }));
   } else if (message.startsWith("NEED_CLOUDFLARED")) {
@@ -1212,6 +1616,6 @@ function handleCliError(error: unknown, json: boolean): void {
 }
 
 program.parseAsync(process.argv).catch((error: Error) => {
-  cross(error.message);
+  cross(sanitizeDiagnosticText(error.message));
   process.exit(1);
 });

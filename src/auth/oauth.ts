@@ -1,15 +1,25 @@
 import { Router, type Request, type Response, urlencoded, json } from "express";
 import { randomBytes } from "node:crypto";
-import { AuthStore, SUPPORTED_SCOPES, base64UrlSha256, filterScopes, safeEqual } from "./store.js";
+import {
+  AuthStore,
+  SUPPORTED_SCOPES,
+  base64UrlSha256,
+  canonicalOAuthIdentity,
+  clientRegistrationFingerprint,
+  compareOAuthIdentity,
+  filterScopes,
+  safeEqual,
+  type CanonicalOAuthIdentity,
+} from "./store.js";
 import { PairingManager } from "../pairing/manager.js";
 import type { Logger } from "../logger/index.js";
-import { PRODUCT_NAME } from "../version.js";
+import { DEFAULT_CONNECTOR_NAME } from "../config/endpoint.js";
 import { escapeHtml, setAuthSecurityHeaders } from "./html.js";
 
 export interface OAuthDeps {
   store: AuthStore;
   pairing: PairingManager;
-  workspaceName: string;
+  getWorkspaceName: () => string;
   getBaseUrl: (req: Request) => string;
   logger: Logger;
 }
@@ -21,7 +31,7 @@ interface PendingAuthRequest {
   scopes: string[];
   state?: string;
   codeChallenge: string;
-  resource?: string;
+  binding: CanonicalOAuthIdentity;
   expiresAt: number;
 }
 
@@ -39,7 +49,8 @@ function isAllowedRedirectUri(uri: string): boolean {
   return false;
 }
 
-function authorizationServerMetadata(base: string): Record<string, unknown> {
+function authorizationServerMetadata(identity: CanonicalOAuthIdentity): Record<string, unknown> {
+  const base = identity.issuer;
   return {
     issuer: base,
     authorization_endpoint: `${base}/oauth/authorize`,
@@ -55,13 +66,13 @@ function authorizationServerMetadata(base: string): Record<string, unknown> {
   };
 }
 
-function protectedResourceMetadata(base: string): Record<string, unknown> {
+function protectedResourceMetadata(identity: CanonicalOAuthIdentity): Record<string, unknown> {
   return {
-    resource: `${base}/mcp`,
-    authorization_servers: [base],
+    resource: identity.resource,
+    authorization_servers: [identity.issuer],
     scopes_supported: [...SUPPORTED_SCOPES],
     bearer_methods_supported: ["header"],
-    resource_name: PRODUCT_NAME,
+    resource_name: DEFAULT_CONNECTOR_NAME,
   };
 }
 
@@ -72,10 +83,11 @@ function pairingPage(opts: {
   error?: string;
 }): string {
   const scopeLabels: Record<string, string> = {
-    "workspace.read": "Read files in this workspace",
+    "workspace.read": "Read files in workspaces authorized by local Codex",
     "workspace.search": "Search this workspace",
     "git.read": "Read git status and diffs",
     "execution.read": "Read Codex execution summaries",
+    "review.submit": "Save review results and send a message that starts the locally authorized Codex task",
     offline_access: "Stay connected between sessions",
   };
   const scopeList = opts.scopes
@@ -84,7 +96,7 @@ function pairingPage(opts: {
   const errorHtml = opts.error
     ? `<p class="error" role="alert">${escapeHtml(opts.error)}</p>`
     : "";
-  const escapedProductName = escapeHtml(PRODUCT_NAME);
+  const escapedProductName = escapeHtml(DEFAULT_CONNECTOR_NAME);
   const escapedWorkspaceName = escapeHtml(opts.workspaceName);
   const escapedRequestId = escapeHtml(opts.requestId);
   return `<!doctype html>
@@ -119,7 +131,8 @@ function pairingPage(opts: {
 <body>
 <div class="card">
   <h1>${escapedProductName}</h1>
-  <p class="sub">ChatGPT is requesting access to workspace <strong>${escapedWorkspaceName}</strong> (read-only):</p>
+  <p class="sub">ChatGPT is requesting the permissions listed below for workspaces authorized by local Codex on this computer.</p>
+  <p class="sub">Authorization started from: <strong>${escapedWorkspaceName}</strong></p>
   <ul>${scopeList}</ul>
   <form method="POST" action="authorize">
     <input type="hidden" name="request_id" value="${escapedRequestId}">
@@ -145,19 +158,35 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
     }
   };
 
+  const authorityFor = (req: Request): CanonicalOAuthIdentity =>
+    canonicalOAuthIdentity({
+      baseUrl: deps.getBaseUrl(req),
+      bridgeId: deps.store.bridgeId,
+      clientId: "",
+      clientRegistration: clientRegistrationFingerprint({ clientId: "", redirectUris: [] }),
+      scopes: [],
+    });
+  const identityFor = (
+    req: Request,
+    clientId: string,
+    scopes: string[]
+  ): CanonicalOAuthIdentity | null => deps.store.identityForClient(deps.getBaseUrl(req), clientId, scopes);
+
   // ---- Discovery metadata -------------------------------------------------
 
   const asMetadataHandler = (req: Request, res: Response): void => {
-    res.json(authorizationServerMetadata(deps.getBaseUrl(req)));
+    res.json(authorizationServerMetadata(authorityFor(req)));
   };
   const prMetadataHandler = (req: Request, res: Response): void => {
-    res.json(protectedResourceMetadata(deps.getBaseUrl(req)));
+    res.json(protectedResourceMetadata(authorityFor(req)));
   };
   router.get("/.well-known/oauth-authorization-server", asMetadataHandler);
   router.get("/.well-known/oauth-authorization-server/mcp", asMetadataHandler);
+  router.get("/.well-known/oauth-authorization-server/mcp/session", asMetadataHandler);
   router.get("/.well-known/openid-configuration", asMetadataHandler);
   router.get("/.well-known/oauth-protected-resource", prMetadataHandler);
   router.get("/.well-known/oauth-protected-resource/mcp", prMetadataHandler);
+  router.get("/.well-known/oauth-protected-resource/mcp/session", prMetadataHandler);
 
   // ---- Dynamic Client Registration (RFC 7591) ------------------------------
 
@@ -177,6 +206,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
     const client = deps.store.registerClient({
       clientName: typeof body.client_name === "string" ? body.client_name.slice(0, 200) : undefined,
       redirectUris: redirectUris as string[],
+      baseUrl: deps.getBaseUrl(req),
     });
     deps.logger.info(`Registered OAuth client ${client.clientId} (${client.clientName ?? "unnamed"})`);
     res.status(201).json({
@@ -222,6 +252,33 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       return;
     }
     const scopes = filterScopes(query.scope);
+    if (!scopes) {
+      fail("invalid_scope", "scope_mismatch");
+      return;
+    }
+    const registrationIdentity = identityFor(req, client.clientId, []);
+    if (!registrationIdentity) {
+      fail("invalid_client", "client_mismatch");
+      return;
+    }
+    const clientMismatch = compareOAuthIdentity(registrationIdentity, client.binding);
+    if (clientMismatch) {
+      fail("invalid_client", clientMismatch);
+      return;
+    }
+    if (query.workspace || query.workspace_id || query.workspaceRoot) {
+      fail("invalid_request", "remote_workspace_selection_denied");
+      return;
+    }
+    const binding = identityFor(req, client.clientId, scopes);
+    if (!binding) {
+      fail("invalid_client", "client_mismatch");
+      return;
+    }
+    if (query.resource !== binding.resource) {
+      fail("invalid_target", "resource_mismatch");
+      return;
+    }
     const request: PendingAuthRequest = {
       id: randomBytes(16).toString("hex"),
       clientId: client.clientId,
@@ -229,7 +286,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       scopes,
       state: query.state,
       codeChallenge: query.code_challenge,
-      resource: query.resource,
+      binding,
       expiresAt: Date.now() + 10 * 60_000,
     };
     pendingRequests.set(request.id, request);
@@ -237,7 +294,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
     res
       .status(200)
       .type("html")
-      .send(pairingPage({ requestId: request.id, workspaceName: deps.workspaceName, scopes }));
+      .send(pairingPage({ requestId: request.id, workspaceName: deps.getWorkspaceName(), scopes }));
   });
 
   router.post("/oauth/authorize", urlencoded({ extended: false }), (req, res) => {
@@ -266,7 +323,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
         .send(
           pairingPage({
             requestId: request.id,
-            workspaceName: deps.workspaceName,
+            workspaceName: deps.getWorkspaceName(),
             scopes: request.scopes,
             error: messages[verdict.reason] ?? "Verification failed.",
           })
@@ -280,7 +337,7 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
       codeChallenge: request.codeChallenge,
       scopes: request.scopes,
       pairingSessionId: verdict.sessionId,
-      resource: request.resource,
+      binding: request.binding,
     });
     deps.logger.info(`Pairing verified; issued authorization code for client ${request.clientId}`);
     const url = new URL(request.redirectUri);
@@ -315,7 +372,20 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
         res.status(400).json({ error: "invalid_grant", error_description: "PKCE verification failed" });
         return;
       }
-      const tokens = deps.store.issueTokens({ clientId, scopes: record.scopes });
+      const expectedIdentity = identityFor(req, clientId, record.scopes);
+      if (!expectedIdentity) {
+        res.status(400).json({ error: "invalid_grant", error_description: "client_mismatch" });
+        return;
+      }
+      const mismatch = compareOAuthIdentity(expectedIdentity, record.binding);
+      if (mismatch || body.resource !== expectedIdentity.resource) {
+        res.status(400).json({
+          error: "invalid_grant",
+          error_description: mismatch ?? "resource_mismatch",
+        });
+        return;
+      }
+      const tokens = deps.store.issueTokens({ identity: record.binding });
       deps.logger.info(`Issued access token for client ${clientId}`);
       res.json({
         access_token: tokens.accessToken,
@@ -333,9 +403,23 @@ export function createOAuthRouter(deps: OAuthDeps): Router {
         res.status(400).json({ error: "invalid_request" });
         return;
       }
-      const result = deps.store.refresh(refreshToken, clientId);
+      const current = authorityFor(req);
+      if (body.resource !== current.resource) {
+        res.status(400).json({ error: "invalid_grant", error_description: "resource_mismatch" });
+        return;
+      }
+      const scopes = body.scope === undefined ? undefined : filterScopes(body.scope);
+      if (scopes === null) {
+        res.status(400).json({ error: "invalid_scope", error_description: "scope_mismatch" });
+        return;
+      }
+      const result = deps.store.refresh(refreshToken, {
+        baseUrl: deps.getBaseUrl(req),
+        clientId,
+        scopes,
+      });
       if (!result.ok) {
-        res.status(400).json({ error: result.reason });
+        res.status(400).json({ error: "invalid_grant", error_description: result.reason });
         return;
       }
       res.json({

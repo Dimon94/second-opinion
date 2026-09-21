@@ -14,6 +14,7 @@ export function runGit(root: string, args: string[]): GitCommandResult {
     encoding: "utf8",
     maxBuffer: 64 * 1024 * 1024,
     timeout: 30_000,
+    windowsHide: true,
   });
   return {
     ok: result.status === 0,
@@ -58,9 +59,20 @@ export interface GitStatusResult {
   unstaged: { path: string; change: string }[];
   untracked: string[];
   conflicted: string[];
+  hidden: { changes: number; conflicts: number };
 }
 
-export function gitStatus(root: string): GitStatusResult {
+export interface WorkspaceLike {
+  root: string;
+  ignoreRules?: IgnoreRules;
+}
+
+export type GitTarget = string | WorkspaceLike;
+
+export function gitStatus(target: GitTarget): GitStatusResult {
+  const root = typeof target === "string" ? target : target.root;
+  const ignoreRules =
+    typeof target === "object" && target.ignoreRules ? target.ignoreRules : new IgnoreRules(root);
   const empty: GitStatusResult = {
     isRepo: false,
     branch: null,
@@ -71,11 +83,15 @@ export function gitStatus(root: string): GitStatusResult {
     unstaged: [],
     untracked: [],
     conflicted: [],
+    hidden: { changes: 0, conflicts: 0 },
   };
-  const result = runGit(root, ["status", "--porcelain=v2", "--branch", "--", "."]);
+  const result = runGit(root, ["status", "--porcelain=v2", "--branch", "-z", "--", "."]);
   if (!result.ok) return empty;
-  const out: GitStatusResult = { ...empty, isRepo: true };
-  for (const line of result.stdout.split("\n")) {
+  const out: GitStatusResult = { ...empty, hidden: { ...empty.hidden }, isRepo: true };
+  const withheld = (paths: string[]) => paths.some((filePath) => ignoreRules.isSensitive(filePath));
+  const records = result.stdout.split("\0");
+  for (let index = 0; index < records.length; index += 1) {
+    const line = records[index];
     if (line.startsWith("# branch.head ")) {
       out.branch = line.slice("# branch.head ".length).trim();
     } else if (line.startsWith("# branch.upstream ")) {
@@ -88,19 +104,28 @@ export function gitStatus(root: string): GitStatusResult {
       }
     } else if (line.startsWith("1 ") || line.startsWith("2 ")) {
       const parts = line.split(" ");
-      const xy = parts[1];
-      const filePath = line.startsWith("2 ")
-        ? line.split("\t")[0]?.split(" ").slice(9).join(" ") + " -> " + (line.split("\t")[1] ?? "")
-        : parts.slice(8).join(" ");
+      const xy = parts[1] ?? "";
+      const isRename = line.startsWith("2 ");
+      const destination = parts.slice(isRename ? 9 : 8).join(" ");
+      const origin = isRename ? (records[++index] ?? "") : null;
+      if (withheld(origin === null ? [destination] : [destination, origin])) {
+        out.hidden.changes += (xy[0] !== "." ? 1 : 0) + (xy[1] !== "." ? 1 : 0);
+        continue;
+      }
+      const filePath = origin === null ? destination : `${destination} -> ${origin}`;
       const x = xy[0];
       const y = xy[1];
       if (x !== ".") out.staged.push({ path: filePath, change: x });
       if (y !== ".") out.unstaged.push({ path: filePath, change: y });
     } else if (line.startsWith("? ")) {
-      out.untracked.push(line.slice(2));
+      const filePath = line.slice(2);
+      if (withheld([filePath])) out.hidden.changes += 1;
+      else out.untracked.push(filePath);
     } else if (line.startsWith("u ")) {
       const parts = line.split(" ");
-      out.conflicted.push(parts.slice(10).join(" "));
+      const filePath = parts.slice(10).join(" ");
+      if (withheld([filePath])) out.hidden.conflicts += 1;
+      else out.conflicted.push(filePath);
     }
   }
   return out;
@@ -125,13 +150,6 @@ export interface GitDiffResult {
   nextOffset: number | null;
   diff: string;
 }
-
-export interface WorkspaceLike {
-  root: string;
-  ignoreRules?: IgnoreRules;
-}
-
-export type GitTarget = string | WorkspaceLike;
 
 function getDiffModeArgs(mode: DiffMode): string[] {
   if (mode === "staged") return ["--cached"];

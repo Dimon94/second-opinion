@@ -5,6 +5,7 @@ import { startBridge } from "../src/bridge/server.js";
 import {
   findBridgeObservation,
   findLiveBridge,
+  runtimeFile,
   writeRuntimeState,
   type RuntimeState,
 } from "../src/bridge/runtime.js";
@@ -108,6 +109,17 @@ describe("findBridgeObservation", () => {
       const observation = await findBridgeObservation(bridge.workspace.id);
       expect(observation.state).toBe("healthy");
       expect(await findLiveBridge(bridge.workspace.id)).not.toBeNull();
+
+      const otherRoot = makeTmpDir("obs-other");
+      dirs.push(otherRoot);
+      write(otherRoot, "b.txt", "b");
+      const other = new Workspace(otherRoot);
+      expect(runtimeFile(other.id)).toBe(runtimeFile(bridge.workspace.id));
+      const globalObservation = await findBridgeObservation(other.id);
+      expect(globalObservation.state).toBe("healthy");
+      if (globalObservation.state === "healthy") {
+        expect(globalObservation.runtime.workspaceId).toBe(bridge.workspace.id);
+      }
     } finally {
       await bridge.close();
     }

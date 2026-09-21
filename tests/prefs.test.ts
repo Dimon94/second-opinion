@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   mergeUiPrefs,
@@ -28,6 +30,53 @@ describe("ui prefs", () => {
     expect(prefs.setupChoicePrompt).toContain("AI 自动化配置（预览版）");
     expect(prefs.setupChoicePrompt).toContain("手动教学配置");
     expect(prefs.setupChoicePrompt).toContain("请回复「1」或「2」");
+  });
+
+  it("accepts legacy workspace options without making prefs workspace-scoped", () => {
+    const stateDir = isolateStateDir();
+    dirs.push(stateDir);
+    const missingRoot = path.join(stateDir, "not-a-workspace");
+    const cli = fileURLToPath(new URL("../src/cli/index.ts", import.meta.url));
+    const run = (args: string[]) => {
+      const result = spawnSync(process.execPath, ["--import", "tsx", cli, "prefs", ...args, "--json"], {
+        encoding: "utf8", env: process.env,
+      });
+      expect(result.stderr).toBe("");
+      expect(result.status).toBe(0);
+      return JSON.parse(result.stdout);
+    };
+
+    expect(run(["set", "-w", missingRoot, "--setup-mode", "manual"])).toMatchObject({ setupMode: "manual" });
+    expect(run(["get", "--workspace", missingRoot])).toMatchObject({ setupMode: "manual" });
+    expect(run(["-w", missingRoot])).toMatchObject({ setupMode: "manual" });
+    expect(run(["get"])).toMatchObject({ setupMode: "manual" });
+    expect(fs.existsSync(missingRoot)).toBe(false);
+    expect(fs.readdirSync(stateDir)).toEqual(["prefs.json"]);
+  });
+
+  it("accepts legacy workspace options on every machine-wide command", () => {
+    const stateDir = isolateStateDir();
+    dirs.push(stateDir);
+    const codexHome = path.join(stateDir, "codex-home");
+    const missingRoot = path.join(stateDir, "not-a-workspace");
+    const cli = fileURLToPath(new URL("../src/cli/index.ts", import.meta.url));
+    fs.writeFileSync(path.join(stateDir, "update-check.json"), JSON.stringify({
+      date: new Date().toLocaleDateString("en-CA"), updateAvailable: false,
+    }));
+    const run = (args: string[]) => spawnSync(process.execPath, ["--import", "tsx", cli, ...args], {
+      encoding: "utf8", env: { ...process.env, CODEX_HOME: codexHome },
+    });
+
+    for (const args of [
+      ["sandbox-allow", "-w", missingRoot, "--json"],
+      ["update-check", "--workspace", missingRoot, "--json"],
+      ["tunnel", "login", "-w", missingRoot, "--help"],
+    ]) {
+      const result = run(args);
+      expect(result.stderr).toBe("");
+      expect(result.status).toBe(0);
+    }
+    expect(fs.existsSync(missingRoot)).toBe(false);
   });
 
   it("remembers developer mode as on only, never as off", () => {

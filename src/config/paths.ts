@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 
 /**
  * State directory resolution, following OS conventions.
@@ -9,15 +10,22 @@ import fs from "node:fs";
 export function getStateDir(): string {
   const override = process.env.C2C_STATE_DIR;
   if (override && override.trim() !== "") return path.resolve(override);
-  const home = os.homedir();
-  switch (process.platform) {
+  return getDefaultStateDir(process.platform, os.homedir(), process.env);
+}
+
+export function getDefaultStateDir(
+  platform: NodeJS.Platform,
+  home: string,
+  env: { LOCALAPPDATA?: string; XDG_STATE_HOME?: string }
+): string {
+  switch (platform) {
     case "darwin":
-      return path.join(home, "Library", "Application Support", "codex-with-chatgpt");
+      return path.posix.join(home, "Library", "Application Support", "codex-with-chatgpt");
     case "win32":
-      return path.join(process.env.LOCALAPPDATA ?? path.join(home, "AppData", "Local"), "codex-with-chatgpt");
+      return path.win32.join(env.LOCALAPPDATA ?? path.win32.join(home, "AppData", "Local"), "codex-with-chatgpt");
     default: {
-      const base = process.env.XDG_STATE_HOME ?? path.join(home, ".local", "state");
-      return path.join(base, "codex-with-chatgpt");
+      const base = env.XDG_STATE_HOME ?? path.posix.join(home, ".local", "state");
+      return path.posix.join(base, "codex-with-chatgpt");
     }
   }
 }
@@ -31,14 +39,28 @@ export function stateSubdir(name: string): string {
   return ensureDir(path.join(getStateDir(), name));
 }
 
+export function legacyMigrationRevocationFile(): string {
+  return path.join(getStateDir(), "migrations", "legacy-global-v1-revoked.json");
+}
+
+export function legacyMigrationClientRevocationsFile(): string {
+  return path.join(getStateDir(), "migrations", "legacy-global-v1-revoked-clients.json");
+}
+
 /** Write a JSON file with owner-only permissions. */
 export function writeSecureJson(file: string, data: unknown): void {
   ensureDir(path.dirname(file));
-  fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+  const temporary = `${file}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    fs.chmodSync(file, 0o600);
-  } catch {
-    // best effort on platforms without chmod semantics
+    fs.writeFileSync(temporary, JSON.stringify(data, null, 2), { mode: 0o600, flag: "wx" });
+    try {
+      fs.chmodSync(temporary, 0o600);
+    } catch {
+      // best effort on platforms without chmod semantics
+    }
+    fs.renameSync(temporary, file);
+  } finally {
+    fs.rmSync(temporary, { force: true });
   }
 }
 

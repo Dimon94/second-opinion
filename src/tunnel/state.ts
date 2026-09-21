@@ -2,6 +2,7 @@ import path from "node:path";
 import { getStateDir, readJsonIfExists, writeSecureJson } from "../config/paths.js";
 
 export type TunnelPreference = "unset" | "quick" | "named";
+const GLOBAL_CONNECTION_ID = "global";
 
 export interface TunnelState {
   workspaceId: string;
@@ -16,22 +17,23 @@ export interface TunnelState {
   fallbackReason?: string;
 }
 
-export function tunnelStateFile(workspaceId: string): string {
-  return path.join(getStateDir(), "tunnels", `${workspaceId}.json`);
+export function tunnelStateFile(_workspaceId?: string): string {
+  return path.join(getStateDir(), "tunnels", `${GLOBAL_CONNECTION_ID}.json`);
 }
 
 export function readTunnelState(workspaceId: string): TunnelState {
   return (
     readJsonIfExists<TunnelState>(tunnelStateFile(workspaceId)) ?? {
-      workspaceId,
+      workspaceId: GLOBAL_CONNECTION_ID,
       preference: "unset",
     }
   );
 }
 
 export function writeTunnelState(state: TunnelState): TunnelState {
-  writeSecureJson(tunnelStateFile(state.workspaceId), state);
-  return state;
+  const saved = { ...state, workspaceId: GLOBAL_CONNECTION_ID };
+  writeSecureJson(tunnelStateFile(), saved);
+  return saved;
 }
 
 export function needsTunnelChoice(state: TunnelState): boolean {
@@ -53,12 +55,12 @@ export function namedTunnelBinding(state: TunnelState): { tunnelName: string; ho
 
 export const TUNNEL_CHOICE_PROMPT = `连 ChatGPT 之前，有一条可选的。
 你有没有 Cloudflare 账号，并且有没有一个域名已经加在 Cloudflare 里？
-- 有：可以用固定域名。插件配一次，以后电脑重启一般不用再改插件。要登录一次 Cloudflare，并在你的域名下加一个子域名。
-- 没有：用临时地址。不用注册，功能一样。但电脑重启后地址常会变，ChatGPT 里的旧地址会失效。我会自己删掉这个项目的插件、用新地址再加回去，你偶尔要再登一下 ChatGPT。能修好，只是更慢。
+- 有：推荐用固定域名。插件配一次，以后电脑重启一般不用再改插件。要登录一次 Cloudflare，并在你的域名下加一个子域名。
+- 没有：用临时地址。不用注册，功能一样。但电脑重启后地址常会变，ChatGPT 里的旧地址会失效。我会自己删掉这台机器的全局连接器、用新地址再加回去，你偶尔要再登一下 ChatGPT。能修好，只是更慢。
 没有账号也完全能用。你选哪个？如果有域名，直接告诉我域名（例如 example.com）。`;
 
 export const NAMED_LOGIN_PROMPT =
-  "会弹出浏览器，请登录 Cloudflare 并选中你的域名，完成后告诉我「好了」。";
+  "我会在 Codex 内置浏览器打开 Cloudflare。请登录并选中你的域名，完成后告诉我「好了」。";
 
 export const NAMED_FALLBACK_MESSAGE =
   "这次先用临时地址。功能一样，以后修连接可能会更慢。想改成固定域名时再说一声。";

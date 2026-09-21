@@ -5,6 +5,12 @@ Data plane: MCP (ChatGPT pulls files, diffs, search results itself).
 
 Never mix the two: control messages carry state, never content.
 
+This protocol is the explicit ChatGPT Web compatibility path. Issue #13's
+default path is direct `@Second Opinion` use inside the current Codex project
+task and does not send these browser messages. `TASK_ID` below correlates C2C
+messages only. It never owns or authorizes a workspace binding; local binding
+commands derive that identity from the host `CODEX_THREAD_ID` and cwd.
+
 ## States
 
 ```
@@ -43,6 +49,15 @@ Local checkpoint values (session only):
 Legacy sessions without a checkpoint keep the old loop. The first normal
 iteration after this version writes a checkpoint automatically.
 
+Session files are keyed by the verified host `CODEX_THREAD_ID` and canonical
+workspace, while `TASK_ID` remains only protocol correlation. Before sending a
+message, save `EXECUTED_LOCAL` when applicable. Save `INIT`, `EXECUTED_SENT`,
+or a HANDOFF waiting state only after that exact message is visibly present in
+the target chat. A Retry-only page is navigation failure, not proof of message
+submission or generation. A replacement chat must bind and return the expected
+`workspace_info` before its URL replaces the previous task URL; until then keep
+the previous URL, Project and checkpoint intact.
+
 Do not re-pair, recreate the connector, or rewrite Project instructions
 just to resume.
 
@@ -58,13 +73,15 @@ Keep messages < 1 KB. No diffs, no logs, no file bodies.
 STATE: INIT
 TASK_ID: c2c_f81a
 ITERATION: 0
+WORKSPACE_BOOTSTRAP: <short-lived-bootstrap>
 
 GOAL:
 Implement dark mode.
 
 INSTRUCTION:
-Inspect the connected workspace through Codex with ChatGPT MCP.
-Create an implementation plan for Codex.
+Call bind_workspace once with WORKSPACE_BOOTSTRAP. Keep the returned
+binding_token private and include it in every workspace_info and read_file call.
+Inspect the connected workspace and create an implementation plan for Codex.
 ```
 
 ### PLAN (ChatGPT → Codex)
@@ -105,6 +122,7 @@ Plans must be finite, concrete, executable. Not 40-step epics.
 STATE: EXECUTED
 TASK_ID: c2c_f81a
 ITERATION: 1
+WORKSPACE_BOOTSTRAP: <short-lived-bootstrap>
 
 RESULT:
 Execution finished.
@@ -115,6 +133,8 @@ CHANGED_FILES:
 TESTS:
 27 passed
 
+Call bind_workspace once with WORKSPACE_BOOTSTRAP. Keep the returned
+binding_token private and include it in every workspace_info and read_file call.
 Please independently inspect the workspace and current git diff through MCP.
 If execution_output lists a readable item for this iteration, list then read it.
 If status is restricted, ignore it and review from git_diff.
@@ -179,6 +199,7 @@ instructions > Project memory.
 STATE: HANDOFF
 TASK_ID: c2c_f81a
 ITERATION: 4
+WORKSPACE_BOOTSTRAP: <short-lived-bootstrap>
 
 ORIGINAL_GOAL:
 Implement dark mode with a persisted user preference.
@@ -213,7 +234,7 @@ Codex owns execution.
 You own high-level reasoning, planning and review.
 
 You have access to the current local workspace through the
-"Codex with ChatGPT" MCP connector.
+"Second Opinion" MCP connector.
 
 Rules:
 
@@ -238,8 +259,11 @@ Rules:
 12. If you receive a HANDOFF message, this conversation continues an
     existing task. Trust the handoff brief for history, re-read any code
     you need through MCP, and resume from NEXT_EXPECTED_STEP.
-13. If this chat sits in a ChatGPT Project, use only the connector named
-    in that Project's instructions. Do not use another workspace's connector.
+13. If this chat sits in a ChatGPT Project, use only the machine-global
+    connector named in that Project's instructions.
+14. A C2C message provides WORKSPACE_BOOTSTRAP before tool use. Call
+    bind_workspace once, keep its returned binding_token private, and include
+    it in every workspace_info and read_file call. Never echo either value.
 ```
 
 ## Project instructions
@@ -258,7 +282,7 @@ This Project is bound only to:
 - Connector (use this one only): {{connector_name}}
 
 When you call tools, use ONLY that connector. Do not use any other
-Codex with ChatGPT connector. If workspace_info names a different
+Second Opinion connector. If workspace_info names a different
 workspace, stop. Do not plan. Do not use this Project's memory.
 
 Read code, git, diffs, and any released command output through that

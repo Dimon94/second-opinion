@@ -29,6 +29,10 @@ describe("connectorAction", () => {
 });
 
 describe("connectorNameFor", () => {
+  it("uses the neutral advisor-facing connector title", () => {
+    expect(DEFAULT_CONNECTOR_NAME).toBe("Second Opinion");
+  });
+
   it("keeps a stored name for the same workspace", () => {
     expect(
       connectorNameFor({
@@ -37,7 +41,7 @@ describe("connectorNameFor", () => {
         previousName: "Codex with ChatGPT",
         hadEndpointBefore: true,
       })
-    ).toBe(DEFAULT_CONNECTOR_NAME);
+    ).toBe("Codex with ChatGPT");
   });
 
   it("keeps the legacy title when this workspace was used before the name field existed", () => {
@@ -50,21 +54,34 @@ describe("connectorNameFor", () => {
     ).toBe(DEFAULT_CONNECTOR_NAME);
   });
 
-  it("gives a new workspace its own connector title", () => {
+  it("uses the one machine-global connector for a new workspace", () => {
     expect(
       connectorNameFor({
         workspaceName: "Landing",
         workspaceId: "def456def456",
         hadEndpointBefore: false,
       })
-    ).toBe("Codex with ChatGPT · Landing");
+    ).toBe(DEFAULT_CONNECTOR_NAME);
+  });
+
+  it("uses the current title when replacing an endpoint", () => {
+    expect(
+      connectorNameFor({
+        workspaceName: "EchoMind",
+        workspaceId: "abc123abc123",
+        previousName: "Codex with ChatGPT",
+        hadEndpointBefore: true,
+        replacingEndpoint: true,
+      })
+    ).toBe(DEFAULT_CONNECTOR_NAME);
   });
 });
 
 describe("mcpUrlFromPublic", () => {
-  it("appends /mcp and folds case/slash variants", () => {
-    expect(mcpUrlFromPublic("https://A.trycloudflare.com/")).toBe("https://a.trycloudflare.com/mcp");
-    expect(mcpUrlFromPublic("https://a.trycloudflare.com/mcp")).toBe("https://a.trycloudflare.com/mcp");
+  it("appends the session-routed MCP path and folds legacy/current variants", () => {
+    expect(mcpUrlFromPublic("https://A.trycloudflare.com/")).toBe("https://a.trycloudflare.com/mcp/session");
+    expect(mcpUrlFromPublic("https://a.trycloudflare.com/mcp")).toBe("https://a.trycloudflare.com/mcp/session");
+    expect(mcpUrlFromPublic("https://a.trycloudflare.com/mcp/session")).toBe("https://a.trycloudflare.com/mcp/session");
     expect(normalizePublicUrl("https://A.trycloudflare.com/")).toBe("https://a.trycloudflare.com");
   });
 });
