@@ -47,6 +47,45 @@ function data<T>(result: { content?: unknown }): T {
 }
 
 describe("session-routed MCP entry", () => {
+  it("keeps another client's binding when one OAuth client is revoked", async () => {
+    const stateDir = isolateStateDir();
+    const root = makeTmpDir("revoke-isolation");
+    write(root, "identity.txt", "still authorized");
+    const bridge = await startBridge({ workspaceRoot: root, port: 0, persistRuntime: false });
+    const accessA = issueAccessToken(bridge);
+    const clientA = await sessionClient(bridge, accessA);
+    const accessB = issueAccessToken(bridge);
+    const clientB = await sessionClient(bridge, accessB);
+    try {
+      const bindings = await Promise.all([clientA, clientB].map(async (client, i) => {
+        const bootstrap = bridge.bindings.mint(root, `task-${i}`);
+        return data<{ binding_token: string }>(await call(client, `session-${i}`, "bind_workspace", {
+          bootstrap_token: bootstrap.bootstrapToken,
+        }));
+      }));
+      const readB = () => call(clientB, "session-1", "read_file", {
+        binding_token: bindings[1].binding_token, path: "identity.txt",
+      });
+      expect(data<{ content: string }>(await readB()).content).toBe("still authorized");
+      const response = await fetch(`${bridge.localBaseUrl()}/oauth/revoke`, {
+        method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" },
+        body: new URLSearchParams({ token: accessA }),
+      });
+      expect(response.status).toBe(200);
+      expect(bridge.authStore.verifyAccessToken(accessB, bridge.localBaseUrl()).ok).toBe(true);
+      expect(bridge.bindings.count()).toBe(1);
+      expect(data<{ content: string }>(await readB()).content).toBe("still authorized");
+      const unpair = await fetch(`${bridge.localBaseUrl()}/admin/revoke-all`, {
+        method: "POST", headers: { authorization: `Bearer ${bridge.adminToken}` },
+      });
+      expect(unpair.status).toBe(200);
+      expect(bridge.bindings.count()).toBe(0);
+    } finally {
+      await clientA.close(); await clientB.close(); await bridge.close();
+      [stateDir, root].forEach(cleanup); delete process.env.C2C_STATE_DIR;
+    }
+  });
+
   it("authorizes locally from a read-only remote session proof without consuming it remotely", async () => {
     const stateDir = isolateStateDir();
     const root = makeTmpDir("local-authorize");
@@ -348,7 +387,8 @@ describe("session-routed MCP entry", () => {
       })).workspaceId).toBe(infoB.workspaceId);
 
       bridge.authStore.revokeToken(accessToken);
-      expect(bridge.bindings.count()).toBe(0);
+      // The separately authorized read-only client keeps its binding.
+      expect(bridge.bindings.count()).toBe(1);
       const revoked = await fetch(`${bridge.localBaseUrl()}/mcp/session`, {
         method: "POST",
         headers: {

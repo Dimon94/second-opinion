@@ -217,6 +217,11 @@ export class WorkspaceBindingStore {
     return removed;
   }
 
+  revokeClient(clientId: string): void {
+    this.bindings = this.bindings.filter((binding) => binding.clientId !== clientId);
+    this.save();
+  }
+
   clear(): void {
     this.bootstraps = [];
     this.bindings = [];

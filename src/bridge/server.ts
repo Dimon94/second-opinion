@@ -102,7 +102,10 @@ export async function startBridge(opts: BridgeOptions): Promise<Bridge> {
 
   const bindings = new WorkspaceBindingStore({ file: opts.bindingStoreFile, bootstrapTtlMs: opts.bindingBootstrapTtlMs });
   const reviews = new ReviewStore(undefined, opts.reviewQueue);
-  const authStore = new AuthStore({ file: opts.authStoreFile, onRevoke: () => bindings.clear() });
+  const authStore = new AuthStore({
+    file: opts.authStoreFile,
+    onRevoke: (clientId) => clientId === undefined ? bindings.clear() : bindings.revokeClient(clientId),
+  });
   const pairing = new PairingManager(workspace.id, { ttlMs: opts.pairingTtlMs });
   let tunnel = opts.tunnelProvider ?? tunnelForWorkspace(workspace.id, logger);
   const adminToken = `c2c_admin_${randomBytes(24).toString("base64url")}`;
