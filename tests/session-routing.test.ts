@@ -364,7 +364,7 @@ describe("session-routed MCP entry", () => {
       const persisted = fs.readFileSync(path.join(stateDir, "bindings", "store.json"), "utf8");
       expect(persisted).not.toContain(bootstrapA.bootstrapToken);
       expect(persisted).not.toContain(boundA.binding_token);
-      expect(persisted).toContain(rootA);
+      expect(persisted).toContain(JSON.stringify(rootA));
 
       const sameOwnerBootstrap = await (await admin("/admin/bindings/bootstrap", { workspaceRoot: rootB, taskId: "task-a" })).json();
       const sameOwnerBinding = data<{ binding_token: string }>(await call(client, "session-a-in-b", "bind_workspace", { bootstrap_token: sameOwnerBootstrap.bootstrapToken }));
