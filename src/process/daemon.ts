@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { ensureDir, getStateDir } from "../config/paths.js";
 import { findBridgeObservation, findLiveBridge, probeBridge, readRuntimeState, type RuntimeState } from "../bridge/runtime.js";
 import { Workspace } from "../workspace/manager.js";
+import { observeProcess } from "./liveness.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -52,11 +53,11 @@ export async function ensureBridge(workspaceRoot: string, opts: { port?: number 
     }
     if (!(await stopBridge(workspaceRoot))) throw new Error("Unable to replace an incompatible Bridge.");
     const shutdownDeadline = Date.now() + 5000;
-    while (await probeBridge(observation.runtime.port, 100)) {
+    // A failed health probe does not mean shutdown finished clearing runtime state.
+    while (observeProcess(observation.runtime.pid) !== "dead") {
       if (Date.now() >= shutdownDeadline) throw new Error("Incompatible Bridge did not stop.");
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
-    await new Promise((resolve) => setTimeout(resolve, 50));
   }
   if (observation.state === "unknown") {
     throw new Error(

@@ -1,5 +1,4 @@
 import fs from "node:fs";
-import { createServer } from "node:http";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
@@ -403,34 +402,37 @@ describe("c2c doctor contract", () => {
     dirs.push(fixture.workspace, fixture.stateDir, fixture.codexHome);
     process.env.C2C_STATE_DIR = fixture.stateDir;
     const workspace = new Workspace(fixture.workspace);
-    const legacy = createServer((req, res) => {
-      res.setHeader("content-type", "application/json");
-      if (req.url === "/health") {
-        res.end(JSON.stringify({ service: SERVICE_NAME, version: VERSION, workspaceId: workspace.id, status: "ok" }));
-        return;
-      }
-      if (req.url === "/admin/info") {
-        res.end(JSON.stringify({ workspaceId: workspace.id, authorization: { state: "healthy" } }));
-        return;
-      }
-      if (req.url === "/admin/shutdown" && req.method === "POST") {
-        res.end(JSON.stringify({ shuttingDown: true }));
-        setTimeout(() => legacy.close(), 10);
-        return;
-      }
-      res.statusCode = 404;
-      res.end("{}");
+    const legacy = spawn(process.execPath, ["-e", `
+      const { createServer } = require("node:http");
+      const workspaceId = process.argv[1];
+      const server = createServer((req, res) => {
+        res.setHeader("content-type", "application/json");
+        if (req.url === "/health") {
+          res.end(JSON.stringify({ service: process.argv[2], version: process.argv[3], workspaceId, status: "ok" }));
+        } else if (req.url === "/admin/info") {
+          res.end(JSON.stringify({ workspaceId, authorization: { state: "healthy" } }));
+        } else if (req.url === "/admin/shutdown" && req.method === "POST") {
+          res.end(JSON.stringify({ shuttingDown: true }));
+          setTimeout(() => server.close(() => process.exit(0)), 10);
+        } else {
+          res.statusCode = 404;
+          res.end("{}");
+        }
+      });
+      server.listen(0, "127.0.0.1", () => process.send(server.address().port));
+    `, workspace.id, SERVICE_NAME, VERSION], { stdio: ["ignore", "ignore", "ignore", "ipc"] });
+    const port = await new Promise<number>((resolve, reject) => {
+      legacy.once("message", (value) => resolve(value as number));
+      legacy.once("error", reject);
+      legacy.once("exit", (code) => reject(new Error(`Legacy fixture exited before ready: ${code}`)));
     });
-    await new Promise<void>((resolve) => legacy.listen(0, "127.0.0.1", resolve));
-    const address = legacy.address();
-    expect(address && typeof address === "object").toBe(true);
     writeRuntimeState({
       service: SERVICE_NAME,
       version: VERSION,
       workspaceId: workspace.id,
       workspaceRoot: workspace.root,
-      pid: process.pid,
-      port: (address as { port: number }).port,
+      pid: legacy.pid!,
+      port,
       adminToken: "legacy-admin-token",
       publicUrl: null,
       startedAt: new Date().toISOString(),
@@ -454,8 +456,10 @@ describe("c2c doctor contract", () => {
       });
     } finally {
       await stopSpawnedBridge(fixture.workspace, fixture.stateDir);
-      if (legacy.listening) {
-        await new Promise<void>((resolve, reject) => legacy.close((error) => error ? reject(error) : resolve()));
+      if (legacy.exitCode === null && legacy.signalCode === null) {
+        const exited = new Promise<void>((resolve) => legacy.once("exit", () => resolve()));
+        legacy.kill();
+        await exited;
       }
     }
   });
